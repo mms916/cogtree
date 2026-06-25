@@ -1,0 +1,114 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <defs>
+    <radialGradient id="bgGlow" cx="78%" cy="18%" r="60%">
+      <stop offset="0%" stop-color="#123037" stop-opacity=".42"/>
+      <stop offset="55%" stop-color="#0d131b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#121923"/>
+      <stop offset="100%" stop-color="#0d121a"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="28" flood-color="#000000" flood-opacity=".42"/>
+    </filter>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.15" fill="#1c3445" opacity=".75"/>
+    </pattern>
+    <style>
+      .ui { font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif; }
+      .muted { fill: #8ea0b5; }
+      .soft { fill: #bac6d8; }
+      .white { fill: #edf7ff; }
+      .teal { fill: #20e0d0; }
+      .tiny { font-size: 15px; }
+      .small { font-size: 18px; }
+      .body { font-size: 20px; }
+      .title { font-size: 28px; font-weight: 700; }
+      .node-title { font-size: 24px; font-weight: 700; }
+      .heading { font-size: 24px; font-weight: 700; }
+      .label { font-size: 17px; font-weight: 700; }
+      .btnText { font-size: 15px; font-weight: 700; }
+    </style>
+  </defs>
+
+  <rect width="1440" height="900" fill="#0b1017"/>
+  <rect width="1440" height="900" fill="url(#dots)" opacity=".85"/>
+  <rect width="1440" height="900" fill="url(#bgGlow)"/>
+
+  <g class="ui" opacity=".95">
+    <path d="M100 260 H310 C350 260 340 205 380 205 H520" fill="none" stroke="#8a5cf6" stroke-width="3" stroke-linecap="round"/>
+    <path d="M100 374 H345 C385 374 375 318 415 318 H610" fill="none" stroke="#3b82f6" stroke-width="3" stroke-linecap="round"/>
+    <path d="M100 488 H315 C355 488 345 430 385 430 H560" fill="none" stroke="#15c9b8" stroke-width="3" stroke-linecap="round"/>
+    <rect x="102" y="226" width="190" height="68" rx="10" fill="#111822" stroke="#8a5cf6" opacity=".9"/>
+    <text x="197" y="268" text-anchor="middle" class="white body" font-weight="700">提炼因果</text>
+    <text x="545" y="212" class="soft small">重复模式</text>
+    <text x="636" y="324" class="soft small">心理脚本</text>
+    <text x="585" y="436" class="soft small">情绪触发</text>
+  </g>
+
+  <g class="ui" filter="url(#shadow)">
+    <rect x="854" y="42" width="500" height="816" rx="16" fill="url(#panel)" stroke="#253241"/>
+
+    <g transform="translate(884 78)">
+      <circle cx="13" cy="13" r="12" fill="#0f3538" stroke="#20e0d0"/>
+      <path d="M10 10 C10 5 16 5 16 10 C21 10 21 17 16 17 C16 22 10 22 10 17 C5 17 5 10 10 10Z" fill="none" stroke="#20e0d0" stroke-width="2" stroke-linejoin="round"/>
+      <text x="40" y="19" class="muted small">节点知识</text>
+      <text x="0" y="68" class="white title">转换因果</text>
+      <text x="440" y="22" class="muted" font-size="28">×</text>
+    </g>
+
+    <line x1="884" y1="166" x2="1324" y2="166" stroke="#22303e"/>
+
+    <g transform="translate(884 202)">
+      <text x="0" y="0" class="soft label">关联金句</text>
+      <rect x="0" y="24" width="440" height="86" rx="10" fill="#101b24" stroke="#203241"/>
+      <rect x="0" y="24" width="4" height="86" rx="2" fill="#20e0d0"/>
+      <text x="20" y="59" class="white small">我们的潜意识，会不自觉地重复早年经历的创伤事件</text>
+      <text x="20" y="87" class="white small">或者情感体验……</text>
+    </g>
+
+    <g transform="translate(884 358)">
+      <text x="0" y="0" class="soft label">笔记</text>
+      <rect x="322" y="-24" width="118" height="34" rx="17" fill="#102d31" stroke="#1a5b5d"/>
+      <text x="381" y="-2" text-anchor="middle" class="teal btnText">收起编辑</text>
+
+      <rect x="0" y="22" width="440" height="52" rx="10" fill="#0b1119" stroke="#253545"/>
+      <g transform="translate(14 36)">
+        <rect x="0" y="0" width="30" height="28" rx="7" fill="#13202b"/>
+        <text x="15" y="20" text-anchor="middle" class="white tiny" font-weight="800">B</text>
+        <rect x="38" y="0" width="30" height="28" rx="7" fill="#13202b"/>
+        <text x="53" y="20" text-anchor="middle" class="white tiny" font-style="italic">I</text>
+        <rect x="76" y="0" width="30" height="28" rx="7" fill="#13202b"/>
+        <text x="91" y="20" text-anchor="middle" class="white tiny" text-decoration="underline">U</text>
+        <rect x="114" y="0" width="38" height="28" rx="7" fill="#123235" stroke="#1c7c7e"/>
+        <text x="133" y="20" text-anchor="middle" class="teal tiny" font-weight="800">H1</text>
+        <rect x="160" y="0" width="38" height="28" rx="7" fill="#13202b"/>
+        <text x="179" y="20" text-anchor="middle" class="white tiny" font-weight="800">H2</text>
+        <rect x="206" y="0" width="54" height="28" rx="7" fill="#13202b"/>
+        <text x="233" y="20" text-anchor="middle" class="soft tiny">引用</text>
+        <rect x="268" y="0" width="54" height="28" rx="7" fill="#13202b"/>
+        <text x="295" y="20" text-anchor="middle" class="soft tiny">列表</text>
+        <circle cx="348" cy="14" r="10" fill="#20e0d0"/>
+        <rect x="370" y="0" width="28" height="28" rx="7" fill="#13202b"/>
+        <text x="384" y="20" text-anchor="middle" class="soft tiny">图</text>
+        <rect x="406" y="0" width="28" height="28" rx="7" fill="#13202b"/>
+        <text x="420" y="20" text-anchor="middle" class="soft tiny">链</text>
+      </g>
+
+      <rect x="0" y="92" width="440" height="420" rx="14" fill="#0d151e" stroke="#1e3544"/>
+      <text x="24" y="142" class="white heading">我的理解</text>
+      <rect x="24" y="170" width="392" height="86" rx="10" fill="#111f2a"/>
+      <rect x="24" y="170" width="4" height="86" rx="2" fill="#20e0d0"/>
+      <text x="42" y="204" class="soft small">弗雷德研究提醒我们，重复并不只是行为，</text>
+      <text x="42" y="232" class="soft small">而是情绪脚本的再现。</text>
+      <text x="24" y="304" class="white small">这个节点用于记录因果转换中的证据、判断和</text>
+      <text x="24" y="334" class="white small">下一步行动。</text>
+      <circle cx="35" cy="382" r="4" fill="#20e0d0"/>
+      <text x="52" y="389" class="soft small">原因：过去经验形成自动化反应</text>
+      <circle cx="35" cy="422" r="4" fill="#20e0d0"/>
+      <text x="52" y="429" class="soft small">结果：相似情境中重复旧模式</text>
+      <circle cx="35" cy="462" r="4" fill="#20e0d0"/>
+      <text x="52" y="469" class="soft small">待验证问题：如何打断重复链条</text>
+    </g>
+  </g>
+</svg>

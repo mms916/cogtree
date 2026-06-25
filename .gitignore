@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+*.log
+.env
+.env.local
+.codex-logs/
+*.zip
+tmp_video_frames/
+tmp_video_frames_*/

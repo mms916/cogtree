@@ -1,0 +1,306 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(uuid()) @db.Uuid
+  email        String       @unique
+  passwordHash String       @map("password_hash")
+  displayName  String       @map("display_name")
+  status       String       @default("active")
+  settingsJson Json         @default("{}") @map("settings_json")
+  createdAt    DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  bookGroups   BookGroup[]
+  books        Book[]
+  themeTrees   ThemeTree[]
+  reviews      Review[]
+  commandLogs  CommandLog[]
+
+  @@map("users")
+}
+
+model BookGroup {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  books     Book[]
+
+  @@index([userId])
+  @@index([userId, name])
+  @@map("book_groups")
+}
+
+model Book {
+  id         String          @id @default(uuid()) @db.Uuid
+  userId     String          @map("user_id") @db.Uuid
+  groupId    String?         @map("group_id") @db.Uuid
+  title      String
+  author     String?
+  coverUrl   String?         @map("cover_url")
+  metaJson   Json            @default("{}") @map("meta_json")
+  createdAt  DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group      BookGroup?      @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  chapters   Chapter[]
+  quotes     Quote[]
+  quoteCards QuoteCard[]
+  bookTrees  BookTree[]
+  bookNodes  BookNode[]
+  sourceMaps SourceMapping[]
+
+  @@index([userId])
+  @@index([groupId])
+  @@index([userId, title])
+  @@map("books")
+}
+
+model Chapter {
+  id         String    @id @default(uuid()) @db.Uuid
+  bookId     String    @map("book_id") @db.Uuid
+  title      String
+  orderIndex Int       @map("order_index")
+  level      Int       @default(1)
+  parentId   String?   @map("parent_id") @db.Uuid
+  metaJson   Json      @default("{}") @map("meta_json")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  book       Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  parent     Chapter?  @relation("ChapterChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children   Chapter[] @relation("ChapterChildren")
+  quotes     Quote[]
+  quoteCards QuoteCard[]
+
+  @@unique([bookId, orderIndex])
+  @@index([bookId])
+  @@index([parentId])
+  @@map("chapters")
+}
+
+model Quote {
+  id               String    @id @default(uuid()) @db.Uuid
+  bookId           String    @map("book_id") @db.Uuid
+  chapterId        String?   @map("chapter_id") @db.Uuid
+  originalText     String    @map("original_text")
+  normalizedText   String?   @map("normalized_text")
+  pageLabel        String?   @map("page_label")
+  tagsJson         Json      @default("[]") @map("tags_json")
+  extractionStatus String    @default("not_started") @map("extraction_status")
+  favoriteStatus   Boolean   @default(false) @map("favorite_status")
+  metaJson         Json      @default("{}") @map("meta_json")
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  book             Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  chapter          Chapter?  @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+  quoteCard        QuoteCard?
+
+  @@index([bookId])
+  @@index([chapterId])
+  @@index([bookId, extractionStatus])
+  @@map("quotes")
+}
+
+model QuoteCard {
+  id                    String    @id @default(uuid()) @db.Uuid
+  quoteId               String    @unique @map("quote_id") @db.Uuid
+  bookId                String    @map("book_id") @db.Uuid
+  chapterId             String?   @map("chapter_id") @db.Uuid
+  keywordsJson          Json      @default("[]") @map("keywords_json")
+  causeListJson         Json      @default("[]") @map("cause_list_json")
+  effectListJson        Json      @default("[]") @map("effect_list_json")
+  middleStepListJson    Json      @default("[]") @map("middle_step_list_json")
+  pendingListJson       Json      @default("[]") @map("pending_list_json")
+  pendingQuestionsJson  Json      @default("[]") @map("pending_questions_json")
+  candidateNodesJson    Json      @default("[]") @map("candidate_nodes_json")
+  candidateEdgesJson    Json      @default("[]") @map("candidate_edges_json")
+  candidateThemeIdsJson Json      @default("[]") @map("candidate_theme_ids_json")
+  notesJson             Json      @default("[]") @map("notes_json")
+  status                String    @default("draft")
+  pushedAt              DateTime? @map("pushed_at") @db.Timestamptz(6)
+  metaJson              Json      @default("{}") @map("meta_json")
+  createdAt             DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  quote                 Quote     @relation(fields: [quoteId], references: [id], onDelete: Cascade)
+  book                  Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  chapter               Chapter?  @relation(fields: [chapterId], references: [id], onDelete: SetNull)
+
+  @@index([bookId])
+  @@index([bookId, status])
+  @@map("quote_cards")
+}
+
+model BookTree {
+  id              String     @id @default(uuid()) @db.Uuid
+  bookId          String     @map("book_id") @db.Uuid
+  version         Int        @default(1)
+  rootNodeIdsJson Json       @default("[]") @map("root_node_ids_json")
+  currentStatus   String     @default("active") @map("current_status")
+  statsJson       Json       @default("{}") @map("stats_json")
+  metaJson        Json       @default("{}") @map("meta_json")
+  createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  book            Book       @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  nodes           BookNode[]
+
+  @@unique([bookId, currentStatus])
+  @@index([bookId])
+  @@map("book_trees")
+}
+
+model BookNode {
+  id                   String         @id @default(uuid()) @db.Uuid
+  treeId               String         @map("tree_id") @db.Uuid
+  bookId               String         @map("book_id") @db.Uuid
+  label                String
+  nodeType             String         @map("node_type")
+  parentId             String?        @map("parent_id") @db.Uuid
+  childrenIdsJson      Json           @default("[]") @map("children_ids_json")
+  orderIndex           Int            @default(0) @map("order_index")
+  shortDefinition      String?        @map("short_definition")
+  fullDefinition       String?        @map("full_definition")
+  themeIdsJson         Json           @default("[]") @map("theme_ids_json")
+  sourceQuoteIdsJson   Json           @default("[]") @map("source_quote_ids_json")
+  sourceChapterIdsJson Json           @default("[]") @map("source_chapter_ids_json")
+  noteCount            Int            @default(0) @map("note_count")
+  pendingQuestionCount Int            @default(0) @map("pending_question_count")
+  reviewStatus         String         @default("normal") @map("review_status")
+  status               String         @default("normal")
+  metaJson             Json           @default("{}") @map("meta_json")
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  tree                 BookTree       @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  book                 Book           @relation(fields: [bookId], references: [id], onDelete: Cascade)
+  parent               BookNode?      @relation("BookNodeChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children             BookNode[]     @relation("BookNodeChildren")
+  sourceMappings       SourceMapping[]
+
+  @@index([treeId])
+  @@index([bookId])
+  @@index([parentId])
+  @@index([treeId, parentId, orderIndex])
+  @@index([treeId, label])
+  @@map("book_nodes")
+}
+
+model ThemeTree {
+  id              String      @id @default(uuid()) @db.Uuid
+  userId          String      @map("user_id") @db.Uuid
+  themeId         String      @map("theme_id")
+  version         Int         @default(1)
+  rootNodeIdsJson Json        @default("[]") @map("root_node_ids_json")
+  currentStatus   String      @default("active") @map("current_status")
+  statsJson       Json        @default("{}") @map("stats_json")
+  metaJson        Json        @default("{}") @map("meta_json")
+  createdAt       DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  nodes           ThemeNode[]
+
+  @@unique([userId, themeId, currentStatus])
+  @@index([userId])
+  @@index([userId, themeId])
+  @@map("theme_trees")
+}
+
+model ThemeNode {
+  id                    String          @id @default(uuid()) @db.Uuid
+  treeId                String          @map("tree_id") @db.Uuid
+  themeId               String          @map("theme_id")
+  label                 String
+  nodeType              String          @map("node_type")
+  parentId              String?         @map("parent_id") @db.Uuid
+  childrenIdsJson       Json            @default("[]") @map("children_ids_json")
+  orderIndex            Int             @default(0) @map("order_index")
+  shortDefinition       String?         @map("short_definition")
+  fullDefinition        String?         @map("full_definition")
+  sourceBookNodeIdsJson Json            @default("[]") @map("source_book_node_ids_json")
+  relatedThemeIdsJson   Json            @default("[]") @map("related_theme_ids_json")
+  abstractLevel         Int             @default(0) @map("abstract_level")
+  verificationStatus    String          @default("normal") @map("verification_status")
+  status                String          @default("normal")
+  metaJson              Json            @default("{}") @map("meta_json")
+  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  tree                  ThemeTree       @relation(fields: [treeId], references: [id], onDelete: Cascade)
+  parent                ThemeNode?      @relation("ThemeNodeChildren", fields: [parentId], references: [id], onDelete: SetNull)
+  children              ThemeNode[]     @relation("ThemeNodeChildren")
+  sourceMappings        SourceMapping[]
+
+  @@index([treeId])
+  @@index([parentId])
+  @@index([treeId, parentId, orderIndex])
+  @@index([treeId, label])
+  @@map("theme_nodes")
+}
+
+model SourceMapping {
+  id          String    @id @default(uuid()) @db.Uuid
+  themeNodeId String    @map("theme_node_id") @db.Uuid
+  bookNodeId  String    @map("book_node_id") @db.Uuid
+  bookId      String    @map("book_id") @db.Uuid
+  mappingType String    @default("direct") @map("mapping_type")
+  metaJson    Json      @default("{}") @map("meta_json")
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  themeNode   ThemeNode @relation(fields: [themeNodeId], references: [id], onDelete: Cascade)
+  bookNode    BookNode  @relation(fields: [bookNodeId], references: [id], onDelete: Cascade)
+  book        Book      @relation(fields: [bookId], references: [id], onDelete: Cascade)
+
+  @@unique([themeNodeId, bookNodeId])
+  @@index([themeNodeId])
+  @@index([bookNodeId])
+  @@index([bookId])
+  @@map("source_mappings")
+}
+
+model Review {
+  id                     String   @id @default(uuid()) @db.Uuid
+  userId                 String   @map("user_id") @db.Uuid
+  reviewType             String   @map("review_type")
+  title                  String
+  sourceBookIdsJson      Json     @default("[]") @map("source_book_ids_json")
+  sourceThemeIdsJson     Json     @default("[]") @map("source_theme_ids_json")
+  summaryText            String?  @map("summary_text")
+  insightsJson           Json     @default("[]") @map("insights_json")
+  unresolvedQuestionsJson Json    @default("[]") @map("unresolved_questions_json")
+  nextActionsJson        Json     @default("[]") @map("next_actions_json")
+  status                 String   @default("draft")
+  metaJson               Json     @default("{}") @map("meta_json")
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, reviewType])
+  @@map("reviews")
+}
+
+model CommandLog {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @map("user_id") @db.Uuid
+  treeType      String   @map("tree_type")
+  treeId        String   @map("tree_id") @db.Uuid
+  targetType    String   @map("target_type")
+  targetId      String?  @map("target_id") @db.Uuid
+  commandName   String   @map("command_name")
+  payloadJson   Json     @map("payload_json")
+  clientVersion Int?     @map("client_version")
+  serverVersion Int?     @map("server_version")
+  resultStatus  String   @default("success") @map("result_status")
+  errorMessage  String?  @map("error_message")
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([treeType, treeId])
+  @@index([userId, createdAt])
+  @@index([commandName])
+  @@map("command_logs")
+}
