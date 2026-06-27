@@ -18,6 +18,44 @@ export interface NodeImageAttachment {
   createdAt: number
 }
 
+export type KnowledgeTagKind = 'quote' | 'reflection' | 'inspiration' | 'case' | 'question' | 'action' | 'custom'
+
+export interface NodeKnowledgeTag {
+  id: string
+  name: string
+  kind: KnowledgeTagKind
+  type: 'system' | 'custom'
+  systemKey?: 'quote'
+  isFixed: boolean
+  color: string
+  sortOrder: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface NodeKnowledgeItem {
+  id: string
+  tagId: string
+  contentType: KnowledgeTagKind
+  title: string
+  content: string
+  contentHtml?: string
+  plainText?: string
+  summary?: string
+  sourceBookName?: string
+  sourcePage?: string
+  tags?: string[]
+  status?: 'todo' | 'active' | 'done' | 'paused'
+  priority?: 'high' | 'medium' | 'low'
+  progress?: number
+  dueDate?: string
+  imageSrc?: string
+  imageAlt?: string
+  chain?: string[]
+  createdAt: number
+  updatedAt: number
+}
+
 export interface BaseNode extends Record<string, unknown> {
   id: string
   label: string
@@ -29,6 +67,8 @@ export interface BaseNode extends Record<string, unknown> {
   position: { x: number; y: number } // React Flow position
   meta?: {
     notes?: NodeNote[]
+    knowledgeTags?: NodeKnowledgeTag[]
+    knowledgeItems?: NodeKnowledgeItem[]
     nodeImages?: NodeImageAttachment[]
     knowledgeImages?: NodeImageAttachment[]
     canvasImage?: boolean

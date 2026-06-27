@@ -57,6 +57,56 @@ const importedQuoteCardSchema = z.object({
   nodeCount: z.number().int().optional(),
 })
 
+const nodeNoteSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  content: z.string(),
+  contentHtml: z.string().optional(),
+  createdAt: z.number(),
+})
+
+const nodeKnowledgeTagSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: z.enum(['quote', 'reflection', 'inspiration', 'case', 'question', 'action', 'custom']),
+  type: z.enum(['system', 'custom']),
+  systemKey: z.literal('quote').optional(),
+  isFixed: z.boolean(),
+  color: z.string(),
+  sortOrder: z.number().int(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+const nodeKnowledgeItemSchema = z.object({
+  id: z.string(),
+  tagId: z.string(),
+  contentType: z.enum(['quote', 'reflection', 'inspiration', 'case', 'question', 'action', 'custom']),
+  title: z.string(),
+  content: z.string(),
+  contentHtml: z.string().optional(),
+  plainText: z.string().optional(),
+  summary: z.string().optional(),
+  sourceBookName: z.string().optional(),
+  sourcePage: z.string().optional(),
+  tags: z.array(z.string()).optional(),
+  status: z.enum(['todo', 'active', 'done', 'paused']).optional(),
+  priority: z.enum(['high', 'medium', 'low']).optional(),
+  progress: z.number().optional(),
+  dueDate: z.string().optional(),
+  imageSrc: z.string().optional(),
+  imageAlt: z.string().optional(),
+  chain: z.array(z.string()).optional(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+})
+
+const nodeMetaSchema = z.object({
+  notes: z.array(nodeNoteSchema).optional(),
+  knowledgeTags: z.array(nodeKnowledgeTagSchema).optional(),
+  knowledgeItems: z.array(nodeKnowledgeItemSchema).optional(),
+}).catchall(z.unknown())
+
 const bookTreeNodeSchema = z.object({
   id: z.string(),
   label: z.string().trim().min(1).max(200),
@@ -69,7 +119,7 @@ const bookTreeNodeSchema = z.object({
     x: z.number(),
     y: z.number(),
   }),
-  meta: z.record(z.string(), z.unknown()).optional(),
+  meta: nodeMetaSchema.optional(),
   shortDefinition: z.string().optional().nullable(),
 })
 
@@ -117,7 +167,7 @@ const themeTreeNodeSchema = z.object({
     x: z.number(),
     y: z.number(),
   }),
-  meta: z.record(z.string(), z.unknown()).optional(),
+  meta: nodeMetaSchema.optional(),
   shortDefinition: z.string().optional().nullable(),
 })
 

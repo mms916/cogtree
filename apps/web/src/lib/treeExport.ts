@@ -1,4 +1,4 @@
-import type { BaseNode, NodeNote } from '../stores/useDocumentStore'
+import type { BaseNode, NodeKnowledgeItem, NodeKnowledgeTag, NodeNote } from '../stores/useDocumentStore'
 
 const ROOT_WIDTH = 174
 const ROOT_HEIGHT = 58
@@ -155,6 +155,88 @@ function normalizeNote(note: NodeNote) {
   return ''
 }
 
+function htmlToMarkdownText(html: string | undefined): string {
+  if (!html) return ''
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<\/?(p|div|section|article|span)[^>]*>/gi, '')
+    .replace(/<h1[^>]*>(.*?)<\/h1>/gis, '# $1\n')
+    .replace(/<h2[^>]*>(.*?)<\/h2>/gis, '## $1\n')
+    .replace(/<h3[^>]*>(.*?)<\/h3>/gis, '### $1\n')
+    .replace(/<strong[^>]*>(.*?)<\/strong>/gis, '**$1**')
+    .replace(/<b[^>]*>(.*?)<\/b>/gis, '**$1**')
+    .replace(/<em[^>]*>(.*?)<\/em>/gis, '*$1*')
+    .replace(/<i[^>]*>(.*?)<\/i>/gis, '*$1*')
+    .replace(/<u[^>]*>(.*?)<\/u>/gis, '$1')
+    .replace(/<blockquote[^>]*>(.*?)<\/blockquote>/gis, (_match: string, content: string): string => {
+      const text: string = htmlToMarkdownText(content)
+      return text.split('\n').map((line: string) => `> ${line}`).join('\n')
+    })
+    .replace(/<li[^>]*>(.*?)<\/li>/gis, '- $1\n')
+    .replace(/<\/?(ul|ol)[^>]*>/gi, '')
+    .replace(/<img[^>]*src=["']([^"']+)["'][^>]*>/gi, '![]($1)')
+    .replace(/<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)<\/a>/gis, '[$2]($1)')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function getKnowledgeItemText(item: NodeKnowledgeItem): string {
+  return (item.plainText?.trim() || item.content?.trim() || htmlToMarkdownText(item.contentHtml)).trim()
+}
+
+function normalizeKnowledgeItem(item: NodeKnowledgeItem): string {
+  const title = item.title.trim()
+  const content = getKnowledgeItemText(item)
+  if (title && content) return `- ${title}\n  ${content.split('\n').join('\n  ')}`
+  if (title) return `- ${title}`
+  if (content) return `- ${content.split('\n').join('\n  ')}`
+  return ''
+}
+
+function getKnowledgeSections(node: BaseNode): Array<{ title: string; items: string[] }> {
+  const tags = Array.isArray(node.meta?.knowledgeTags) ? node.meta.knowledgeTags : []
+  const items = Array.isArray(node.meta?.knowledgeItems) ? node.meta.knowledgeItems : []
+  if (items.length === 0) return []
+
+  const knownTags = new Map<string, NodeKnowledgeTag>()
+  tags.forEach((tag) => knownTags.set(tag.id, tag))
+
+  const grouped = new Map<string, NodeKnowledgeItem[]>()
+  items.forEach((item) => {
+    const list = grouped.get(item.tagId) ?? []
+    list.push(item)
+    grouped.set(item.tagId, list)
+  })
+
+  const orderedTagIds = [
+    ...tags
+      .slice()
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map((tag) => tag.id),
+    ...Array.from(grouped.keys()).filter((tagId) => !knownTags.has(tagId)),
+  ]
+
+  return orderedTagIds
+    .map((tagId) => {
+      const tag = knownTags.get(tagId)
+      const tagItems = grouped.get(tagId) ?? []
+      const itemTexts = tagItems.map(normalizeKnowledgeItem).filter(Boolean)
+      return {
+        title: tag?.name ?? '未分类',
+        items: itemTexts,
+      }
+    })
+    .filter((section) => section.items.length > 0)
+}
+
 function walkOutlineMarkdown(nodes: Record<string, BaseNode>, nodeId: string, depth = 0): string[] {
   const node = nodes[nodeId]
   if (!node) return []
@@ -177,11 +259,12 @@ function walkKnowledgeMarkdown(
 
   const headingLevel = Math.min(depth + 2, 6)
   const notes = node.meta?.notes ?? []
+  const knowledgeSections = getKnowledgeSections(node)
   const lines = [
     `${'#'.repeat(headingLevel)} ${getNodeTitle(node)}`,
     '',
     `- 节点类型：${NODE_TYPE_LABELS[node.nodeType] ?? node.nodeType}`,
-    `- 重要节点：${node.meta?.important === true ? '是' : '否'}`
+    `- 重要节点：${node.meta?.isImportant === true ? '是' : '否'}`
   ]
 
   if (node.shortDefinition?.trim()) {
@@ -192,7 +275,14 @@ function walkKnowledgeMarkdown(
     lines.push('', '关联金句：', '', `> ${linkedQuoteText.trim().replace(/\n/g, '\n> ')}`)
   }
 
-  if (notes.length > 0) {
+  if (knowledgeSections.length > 0) {
+    lines.push('', '节点知识：', '')
+    knowledgeSections.forEach((section) => {
+      lines.push(`### ${section.title}`, '')
+      section.items.forEach((itemText) => lines.push(itemText))
+      lines.push('')
+    })
+  } else if (notes.length > 0) {
     lines.push('', '思考与感悟：', '')
     notes.map(normalizeNote).filter(Boolean).forEach((noteText) => {
       lines.push(noteText)
