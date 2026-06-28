@@ -21,6 +21,16 @@ export interface NodeImageAttachment {
 export type KnowledgeTagKind = 'quote' | 'reflection' | 'inspiration' | 'case' | 'question' | 'action' | 'custom'
 export type QuestionTemplateType = 'causal' | 'system' | 'completeness' | 'overlap' | 'level' | 'verification'
 export type QuestionStatus = 'not_started' | 'to_think' | 'in_progress' | 'to_verify' | 'resolved' | 'converted_to_action'
+export type ActionStatus = 'todo' | 'in_progress' | 'done' | 'delayed' | 'cancelled'
+
+export interface NodeActionStep {
+  id: string
+  title: string
+  isDone: boolean
+  sortOrder: number
+  createdAt: number
+  updatedAt: number
+}
 
 export interface NodeKnowledgeTag {
   id: string
@@ -47,13 +57,15 @@ export interface NodeKnowledgeItem {
   sourceBookName?: string
   sourcePage?: string
   tags?: string[]
-  status?: 'todo' | 'active' | 'done' | 'paused' | QuestionStatus
+  status?: 'todo' | 'active' | 'done' | 'paused' | 'delayed' | 'cancelled' | QuestionStatus
   priority?: 'high' | 'medium' | 'low'
   progress?: number
   dueDate?: string
   questionType?: QuestionTemplateType
   convertedActionId?: string
   parentActionId?: string
+  linkedQuestionId?: string
+  actionSteps?: NodeActionStep[]
   linkedNodeIds?: string[]
   linkedQuoteIds?: string[]
   linkedCaseIds?: string[]

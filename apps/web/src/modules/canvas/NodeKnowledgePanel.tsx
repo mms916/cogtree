@@ -1,5 +1,5 @@
 ﻿import { useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, MouseEvent as ReactMouseEvent, SyntheticEvent } from 'react'
+import type { CSSProperties, DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, SyntheticEvent } from 'react'
 import { Extension } from '@tiptap/core'
 import Image from '@tiptap/extension-image'
 import Link from '@tiptap/extension-link'
@@ -44,9 +44,11 @@ import {
 
 import type {
   BaseNode,
+  NodeActionStep,
   NodeKnowledgeItem,
   NodeKnowledgeTag,
   NodeNote,
+  ActionStatus,
   QuestionStatus,
   QuestionTemplateType,
 } from '../../stores/useDocumentStore'
@@ -82,6 +84,8 @@ type InspirationCategory = {
 }
 
 type QuestionFilter = 'all' | QuestionTemplateType
+type ActionFilter = 'all' | 'today' | 'in_progress' | 'todo' | 'done'
+type ActionSort = 'dueDate' | 'createdAt' | 'priority'
 
 type QuestionTemplate = {
   type: QuestionTemplateType
@@ -147,6 +151,20 @@ const QUESTION_STATUS_OPTIONS: Array<{ id: QuestionStatus; label: string }> = [
   { id: 'to_verify', label: '待验证' },
   { id: 'resolved', label: '已解决' },
   { id: 'converted_to_action', label: '已转行动' },
+]
+const ACTION_STATUS_OPTIONS: Array<{ id: ActionStatus; label: string }> = [
+  { id: 'todo', label: '待开始' },
+  { id: 'in_progress', label: '进行中' },
+  { id: 'done', label: '已完成' },
+  { id: 'delayed', label: '已延期' },
+  { id: 'cancelled', label: '已取消' },
+]
+const ACTION_FILTERS: Array<{ id: ActionFilter; label: string }> = [
+  { id: 'all', label: '全部行动' },
+  { id: 'today', label: '今日' },
+  { id: 'in_progress', label: '进行中' },
+  { id: 'todo', label: '待开始' },
+  { id: 'done', label: '已完成' },
 ]
 const DEFAULT_QUESTION_TEMPLATES: QuestionTemplate[] = [
   { type: 'causal', title: '这个结果的最近因是什么？', description: '当前出现的结果，最直接的原因是什么？还能继续往前追到更底层的因吗？' },
@@ -269,6 +287,38 @@ function getDueDateHint(dueDate?: string) {
   if (days === 0) return '今天'
   if (days > 0) return `${days}天后`
   return `逾期${Math.abs(days)}天`
+}
+
+function getActionStatus(status?: NodeKnowledgeItem['status']): ActionStatus {
+  if (status === 'done') return 'done'
+  if (status === 'active' || status === 'in_progress') return 'in_progress'
+  if (status === 'delayed') return 'delayed'
+  if (status === 'cancelled' || status === 'paused') return 'cancelled'
+  return 'todo'
+}
+
+function getActionStatusLabel(status?: NodeKnowledgeItem['status']) {
+  const normalized = getActionStatus(status)
+  return ACTION_STATUS_OPTIONS.find((option) => option.id === normalized)?.label ?? '待开始'
+}
+
+function getActionProgress(item: NodeKnowledgeItem) {
+  const steps = item.actionSteps ?? []
+  if (steps.length > 0) {
+    return Math.round(steps.filter((step) => step.isDone).length / steps.length * 100)
+  }
+  return Math.max(0, Math.min(100, item.progress ?? (getActionStatus(item.status) === 'done' ? 100 : 0)))
+}
+
+function isTodayDate(date?: string) {
+  if (!date) return false
+  const today = new Date()
+  const localToday = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, '0'),
+    String(today.getDate()).padStart(2, '0'),
+  ].join('-')
+  return date === localToday
 }
 const DEFAULT_TAGS = TAG_TEMPLATES.filter((tag) => DEFAULT_TAG_IDS.has(tag.id))
 const KNOWLEDGE_TEXT_COLORS = [
@@ -452,10 +502,17 @@ function getDefaultHtml(tag: NodeKnowledgeTag) {
 }
 
 function getKnowledgeTags(meta: BaseNode['meta']): NodeKnowledgeTag[] {
-  const storedTags = Array.isArray(meta?.knowledgeTags) ? meta?.knowledgeTags as Partial<NodeKnowledgeTag>[] : []
+  const hasStoredTags = Array.isArray(meta?.knowledgeTags)
+  const storedTags = hasStoredTags ? meta?.knowledgeTags as Partial<NodeKnowledgeTag>[] : []
   const merged = new Map<string, NodeKnowledgeTag>()
 
-  DEFAULT_TAGS.forEach((tag) => merged.set(tag.id, tag))
+  if (!hasStoredTags) {
+    DEFAULT_TAGS.forEach((tag) => merged.set(tag.id, tag))
+  } else {
+    DEFAULT_TAGS
+      .filter((tag) => PROTECTED_TAG_IDS.has(tag.id))
+      .forEach((tag) => merged.set(tag.id, tag))
+  }
   storedTags.forEach((tag) => {
     if (!tag.id || !tag.name) return
     const fallback = merged.get(tag.id)
@@ -503,6 +560,8 @@ function getKnowledgeItems(selectedNode: BaseNode): NodeKnowledgeItem[] {
         questionType: item.questionType,
         convertedActionId: item.convertedActionId,
         parentActionId: item.parentActionId,
+        linkedQuestionId: item.linkedQuestionId,
+        actionSteps: item.actionSteps,
         linkedNodeIds: item.linkedNodeIds,
         linkedQuoteIds: item.linkedQuoteIds,
         linkedCaseIds: item.linkedCaseIds,
@@ -902,6 +961,13 @@ export function NodeKnowledgePanel({
   const [actionDraftDueDate, setActionDraftDueDate] = useState('')
   const [actionDraftPriority, setActionDraftPriority] = useState<'high' | 'medium' | 'low'>('medium')
   const [actionDraftProgress, setActionDraftProgress] = useState(0)
+  const [actionDraftStatus, setActionDraftStatus] = useState<ActionStatus>('todo')
+  const [actionFilter, setActionFilter] = useState<ActionFilter>('all')
+  const [actionSort, setActionSort] = useState<ActionSort>('dueDate')
+  const [actionView, setActionView] = useState<'list' | 'card'>('list')
+  const [actionStepDraft, setActionStepDraft] = useState('')
+  const [editingActionStepId, setEditingActionStepId] = useState<string | null>(null)
+  const [editingActionStepDraft, setEditingActionStepDraft] = useState('')
   const [selectedActionId, setSelectedActionId] = useState<string | null>(null)
   const [actionContextMenu, setActionContextMenu] = useState<ActionMenuState>(null)
   const [actionPriorityMenu, setActionPriorityMenu] = useState<ActionMenuState>(null)
@@ -911,6 +977,8 @@ export function NodeKnowledgePanel({
   const [quoteActionMenuId, setQuoteActionMenuId] = useState<string | null>(null)
   const [editingTagId, setEditingTagId] = useState<string | null>(null)
   const [editingTagDraft, setEditingTagDraft] = useState('')
+  const [draggingTagId, setDraggingTagId] = useState<string | null>(null)
+  const [dragOverTagId, setDragOverTagId] = useState<string | null>(null)
   const [tagDialog, setTagDialog] = useState<TagDialogState>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const latestPanelWidthRef = useRef(panelWidth)
@@ -921,6 +989,12 @@ export function NodeKnowledgePanel({
   const inspirationCategories = useMemo(() => getInspirationCategories(selectedNode.meta), [selectedNode.id, selectedNode.meta?.inspirationCategories])
   const activeTag = tags.find((tag) => tag.id === activeTagId) ?? tags[0]
   const activeItems = activeTag ? items.filter((item) => item.tagId === activeTag.id) : []
+  const selectedAction = activeTag?.kind === 'action' && selectedActionId
+    ? activeItems.find((item) => item.id === selectedActionId)
+    : undefined
+  const selectedActionLinkedQuestion = selectedAction?.linkedQuestionId
+    ? items.find((item) => item.id === selectedAction.linkedQuestionId)
+    : undefined
 
   useEffect(() => {
     setActiveTagId('quote')
@@ -936,6 +1010,15 @@ export function NodeKnowledgePanel({
     setActionDraftDueDate('')
     setActionDraftPriority('medium')
     setActionDraftProgress(0)
+    setActionDraftStatus('todo')
+    setActionFilter('all')
+    setActionSort('dueDate')
+    setActionView('list')
+    setActionStepDraft('')
+    setEditingActionStepId(null)
+    setEditingActionStepDraft('')
+    setDraggingTagId(null)
+    setDragOverTagId(null)
     setSelectedActionId(null)
     setActionContextMenu(null)
     setActionPriorityMenu(null)
@@ -1072,6 +1155,7 @@ export function NodeKnowledgePanel({
       status: activeTag.kind === 'action' ? 'todo' : activeTag.kind === 'question' ? 'to_think' : undefined,
       priority: activeTag.kind === 'action' ? 'medium' : undefined,
       progress: activeTag.kind === 'action' ? 0 : undefined,
+      actionSteps: activeTag.kind === 'action' ? [] : undefined,
       dueDate: activeTag.kind === 'action' ? new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : undefined,
       chain: activeTag.kind === 'case' ? ['触发因素', '过程变化', '结果'] : undefined,
       questionType: activeTag.kind === 'question' ? (questionFilter === 'all' ? 'causal' : questionFilter) : undefined,
@@ -1092,6 +1176,7 @@ export function NodeKnowledgePanel({
       setActionDraftDueDate(newItem.dueDate ?? '')
       setActionDraftPriority(newItem.priority ?? 'medium')
       setActionDraftProgress(newItem.progress ?? 0)
+      setActionDraftStatus(getActionStatus(newItem.status))
     }
     setDraft({
       title: newItem.title,
@@ -1117,6 +1202,7 @@ export function NodeKnowledgePanel({
       setActionDraftDueDate(item.dueDate ?? '')
       setActionDraftPriority(item.priority ?? 'medium')
       setActionDraftProgress(item.progress ?? 0)
+      setActionDraftStatus(getActionStatus(item.status))
     }
     setDraft({
       title: item.title,
@@ -1141,6 +1227,7 @@ export function NodeKnowledgePanel({
       status: 'todo',
       priority: 'medium',
       progress: 0,
+      actionSteps: [],
       dueDate,
       parentActionId,
       sortOrder: activeItems.length,
@@ -1156,6 +1243,7 @@ export function NodeKnowledgePanel({
     setActionDraftDueDate(dueDate)
     setActionDraftPriority('medium')
     setActionDraftProgress(0)
+    setActionDraftStatus('todo')
     setDraft({
       title: newItem.title,
       content: '',
@@ -1195,7 +1283,7 @@ export function NodeKnowledgePanel({
           ? draft.chain.map((step) => step.trim()).filter(Boolean)
           : item.chain,
         questionType: item.contentType === 'question' ? questionDraftType : item.questionType,
-        status: item.contentType === 'question' ? questionDraftStatus : item.status,
+        status: item.contentType === 'action' ? actionDraftStatus : item.contentType === 'question' ? questionDraftStatus : item.status,
         tags: item.contentType === 'question' ? [getQuestionCategoryLabel(questionDraftType)] : item.contentType === 'inspiration' ? [nextTitle] : item.tags,
         dueDate: item.contentType === 'action' ? actionDraftDueDate : item.dueDate,
         priority: item.contentType === 'action' ? actionDraftPriority : item.priority,
@@ -1269,6 +1357,46 @@ export function NodeKnowledgePanel({
   const cancelRenameTag = () => {
     setEditingTagId(null)
     setEditingTagDraft('')
+  }
+
+  const reorderTag = (draggedTagId: string, targetTagId: string) => {
+    if (draggedTagId === targetTagId || PROTECTED_TAG_IDS.has(draggedTagId) || PROTECTED_TAG_IDS.has(targetTagId)) {
+      return
+    }
+    const draggedIndex = tags.findIndex((tag) => tag.id === draggedTagId)
+    const targetIndex = tags.findIndex((tag) => tag.id === targetTagId)
+    if (draggedIndex < 0 || targetIndex < 0) return
+
+    const reordered = [...tags]
+    const [draggedTag] = reordered.splice(draggedIndex, 1)
+    reordered.splice(targetIndex, 0, draggedTag)
+    const now = Date.now()
+    const nextTags = reordered.map((tag, index) => ({
+      ...tag,
+      sortOrder: index,
+      updatedAt: tag.id === draggedTagId ? now : tag.updatedAt,
+    }))
+    persistKnowledgeState(nextTags, items)
+  }
+
+  const startTagDrag = (event: ReactDragEvent<HTMLDivElement>, tag: NodeKnowledgeTag) => {
+    if (PROTECTED_TAG_IDS.has(tag.id) || editingTagId === tag.id) {
+      event.preventDefault()
+      return
+    }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('text/plain', tag.id)
+    setDraggingTagId(tag.id)
+    setDragOverTagId(null)
+    setTagMenu(null)
+  }
+
+  const dropTag = (event: ReactDragEvent<HTMLDivElement>, targetTag: NodeKnowledgeTag) => {
+    event.preventDefault()
+    const draggedTagId = draggingTagId || event.dataTransfer.getData('text/plain')
+    if (draggedTagId) reorderTag(draggedTagId, targetTag.id)
+    setDraggingTagId(null)
+    setDragOverTagId(null)
   }
 
   const deleteTag = (tag: NodeKnowledgeTag) => {
@@ -1534,6 +1662,14 @@ export function NodeKnowledgePanel({
                 <option value="low">低</option>
               </select>
             </label>
+            <label>
+              <span>状态</span>
+              <select value={actionDraftStatus} onChange={(event) => setActionDraftStatus(event.target.value as ActionStatus)}>
+                {ACTION_STATUS_OPTIONS.map((status) => (
+                  <option key={status.id} value={status.id}>{status.label}</option>
+                ))}
+              </select>
+            </label>
             <label className="knowledge-action-progress-input">
               <span>完成进度</span>
               <input
@@ -1692,6 +1828,73 @@ export function NodeKnowledgePanel({
     persistKnowledgeState(tags, nextItems)
   }
 
+  const updateActionSteps = (item: NodeKnowledgeItem, nextSteps: NodeActionStep[]) => {
+    const progress = nextSteps.length > 0
+      ? Math.round(nextSteps.filter((step) => step.isDone).length / nextSteps.length * 100)
+      : item.progress ?? 0
+    const status: ActionStatus = nextSteps.length > 0 && progress === 100
+      ? 'done'
+      : progress > 0
+        ? 'in_progress'
+        : getActionStatus(item.status) === 'done'
+          ? 'todo'
+          : getActionStatus(item.status)
+    updateItemPatch(item.id, { actionSteps: nextSteps, progress, status })
+  }
+
+  const addActionStep = (item: NodeKnowledgeItem) => {
+    const title = actionStepDraft.trim()
+    if (!title) return
+    const now = Date.now()
+    const nextSteps = [
+      ...(item.actionSteps ?? []),
+      {
+        id: createKnowledgeId('step'),
+        title,
+        isDone: false,
+        sortOrder: item.actionSteps?.length ?? 0,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]
+    updateActionSteps(item, nextSteps)
+    setActionStepDraft('')
+  }
+
+  const toggleActionStep = (item: NodeKnowledgeItem, stepId: string) => {
+    const now = Date.now()
+    const nextSteps = (item.actionSteps ?? []).map((step) => step.id === stepId
+      ? { ...step, isDone: !step.isDone, updatedAt: now }
+      : step
+    )
+    updateActionSteps(item, nextSteps)
+  }
+
+  const deleteActionStep = (item: NodeKnowledgeItem, stepId: string) => {
+    updateActionSteps(item, (item.actionSteps ?? []).filter((step) => step.id !== stepId))
+  }
+
+  const startEditActionStep = (step: NodeActionStep) => {
+    setEditingActionStepId(step.id)
+    setEditingActionStepDraft(step.title)
+  }
+
+  const saveActionStepTitle = (item: NodeKnowledgeItem, stepId: string) => {
+    const title = editingActionStepDraft.trim()
+    setEditingActionStepId(null)
+    setEditingActionStepDraft('')
+    if (!title) return
+    const now = Date.now()
+    updateActionSteps(item, (item.actionSteps ?? []).map((step) => step.id === stepId
+      ? { ...step, title, updatedAt: now }
+      : step
+    ))
+  }
+
+  const toggleActionDetail = (itemId: string) => {
+    setSelectedActionId((current) => current === itemId ? null : itemId)
+  }
+
   const generateQuestionTemplates = (filter: QuestionFilter) => {
     if (!activeTag || activeTag.kind !== 'question') return
     const templates = DEFAULT_QUESTION_TEMPLATES.filter((template) => filter === 'all' || template.type === filter)
@@ -1741,6 +1944,8 @@ export function NodeKnowledgePanel({
       status: 'todo',
       priority: 'medium',
       progress: 0,
+      actionSteps: [],
+      linkedQuestionId: item.id,
       dueDate: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
       createdAt: now,
       updatedAt: now,
@@ -1807,13 +2012,30 @@ export function NodeKnowledgePanel({
         {tags.map((tag) => {
           const active = activeTag?.id === tag.id
           const isEditingTag = editingTagId === tag.id
+          const isDraggableTag = !PROTECTED_TAG_IDS.has(tag.id)
           return (
             <div
               key={tag.id}
-              className={`knowledge-workbench-tab${active ? ' is-active' : ''}`}
+              className={`knowledge-workbench-tab${active ? ' is-active' : ''}${isDraggableTag ? ' is-draggable' : ' is-fixed'}${draggingTagId === tag.id ? ' is-dragging' : ''}${dragOverTagId === tag.id ? ' is-drag-over' : ''}`}
               style={{ '--tag-color': tag.color } as CSSProperties}
               role="button"
               tabIndex={0}
+              draggable={isDraggableTag && !isEditingTag}
+              onDragStart={(event) => startTagDrag(event, tag)}
+              onDragOver={(event) => {
+                if (!draggingTagId || !isDraggableTag || draggingTagId === tag.id) return
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDragOverTagId(tag.id)
+              }}
+              onDragLeave={() => {
+                if (dragOverTagId === tag.id) setDragOverTagId(null)
+              }}
+              onDrop={(event) => dropTag(event, tag)}
+              onDragEnd={() => {
+                setDraggingTagId(null)
+                setDragOverTagId(null)
+              }}
               onClick={() => {
                 if (isEditingTag) return
                 setActiveTagId(tag.id)
@@ -2288,11 +2510,113 @@ export function NodeKnowledgePanel({
     )
   }
 
+  const renderExternalActionDetail = () => {
+    if (!selectedAction || editingItemId === selectedAction.id) return null
+
+    return (
+      <aside className="knowledge-action-external-detail">
+        <div className="knowledge-action-detail-head">
+          <div>
+            <strong>{selectedAction.title}</strong>
+            <span className={`knowledge-action-priority-badge is-priority-${selectedAction.priority ?? 'medium'}`}>
+              {selectedAction.priority === 'high' ? '高优先级' : selectedAction.priority === 'low' ? '低优先级' : '中优先级'}
+            </span>
+          </div>
+          <div className="knowledge-action-detail-head-actions">
+            <span className={`knowledge-action-status is-${getActionStatus(selectedAction.status)}`}>{getActionStatusLabel(selectedAction.status)}</span>
+            <button type="button" title="关闭行动详情" onClick={() => setSelectedActionId(null)}><X size={14} /></button>
+          </div>
+        </div>
+        <p className="knowledge-action-detail-description">
+          {selectedAction.plainText || selectedAction.content || '为这项行动补充具体说明、执行条件与期望结果。'}
+        </p>
+        <div className="knowledge-action-detail-meta">
+          <span><Calendar size={13} /> 截止时间：{getDueDateHint(selectedAction.dueDate)}</span>
+          <span>创建时间：{new Date(selectedAction.createdAt).toLocaleDateString('zh-CN')}</span>
+          <span>进度：{getActionProgress(selectedAction)}%</span>
+          <div className="knowledge-progress-bar"><span style={{ width: `${getActionProgress(selectedAction)}%` }} /></div>
+        </div>
+
+        <div className="knowledge-action-steps">
+          <strong>行动步骤</strong>
+          {(selectedAction.actionSteps ?? []).map((step, index) => (
+            <div key={step.id} className={`knowledge-action-step${step.isDone ? ' is-done' : ''}`}>
+              <button type="button" onClick={() => toggleActionStep(selectedAction, step.id)}>
+                {step.isDone && <Check size={11} />}
+              </button>
+              {editingActionStepId === step.id ? (
+                <input
+                  className="knowledge-action-step-edit"
+                  value={editingActionStepDraft}
+                  autoFocus
+                  onChange={(event) => setEditingActionStepDraft(event.target.value)}
+                  onBlur={() => saveActionStepTitle(selectedAction, step.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur()
+                    if (event.key === 'Escape') {
+                      setEditingActionStepId(null)
+                      setEditingActionStepDraft('')
+                    }
+                  }}
+                />
+              ) : (
+                <span
+                  title="双击编辑步骤"
+                  onDoubleClick={(event) => {
+                    event.stopPropagation()
+                    startEditActionStep(step)
+                  }}
+                >
+                  {index + 1}. {step.title}
+                </span>
+              )}
+              <button type="button" className="is-delete" title="删除步骤" onClick={() => deleteActionStep(selectedAction, step.id)}>
+                <X size={12} />
+              </button>
+            </div>
+          ))}
+          <div className="knowledge-action-step-add">
+            <input
+              value={actionStepDraft}
+              placeholder="添加一个可执行步骤..."
+              onChange={(event) => setActionStepDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') addActionStep(selectedAction)
+              }}
+            />
+            <button type="button" onClick={() => addActionStep(selectedAction)}><Plus size={13} /> 添加</button>
+          </div>
+        </div>
+
+        {selectedActionLinkedQuestion && (
+          <button
+            type="button"
+            className="knowledge-action-linked-question"
+            onClick={() => setActiveTagId(selectedActionLinkedQuestion.tagId)}
+          >
+            <CircleHelp size={14} />
+            <span><small>关联追问</small>{selectedActionLinkedQuestion.title}</span>
+            <ChevronDown size={13} />
+          </button>
+        )}
+
+      </aside>
+    )
+  }
+
   const renderActionPage = () => {
-    const doneCount = activeItems.filter((item) => item.status === 'done').length
+    const doneCount = activeItems.filter((item) => getActionStatus(item.status) === 'done').length
     const progress = activeItems.length === 0 ? 0 : Math.round(doneCount / activeItems.length * 100)
     const actionIds = new Set(activeItems.map((item) => item.id))
     const rootActions = activeItems.filter((item) => !item.parentActionId || !actionIds.has(item.parentActionId))
+    const priorityWeight = { high: 0, medium: 1, low: 2 }
+    const compareActions = (left: NodeKnowledgeItem, right: NodeKnowledgeItem) => {
+      if (actionSort === 'createdAt') return right.createdAt - left.createdAt
+      if (actionSort === 'priority') {
+        return priorityWeight[left.priority ?? 'medium'] - priorityWeight[right.priority ?? 'medium']
+      }
+      return (left.dueDate || '9999-12-31').localeCompare(right.dueDate || '9999-12-31')
+    }
     const orderedActions: Array<{ item: NodeKnowledgeItem; depth: number }> = []
     const visited = new Set<string>()
     const appendAction = (item: NodeKnowledgeItem, depth: number) => {
@@ -2301,21 +2625,28 @@ export function NodeKnowledgePanel({
       orderedActions.push({ item, depth })
       activeItems
         .filter((child) => child.parentActionId === item.id)
-        .sort((left, right) => (left.sortOrder ?? left.createdAt) - (right.sortOrder ?? right.createdAt))
+        .sort(compareActions)
         .forEach((child) => appendAction(child, depth + 1))
     }
     rootActions
-      .sort((left, right) => (left.sortOrder ?? left.createdAt) - (right.sortOrder ?? right.createdAt))
+      .sort(compareActions)
       .forEach((item) => appendAction(item, 0))
     activeItems.filter((item) => !visited.has(item.id)).forEach((item) => appendAction(item, 0))
 
+    const visibleActions = orderedActions.filter(({ item }) => {
+      const status = getActionStatus(item.status)
+      if (actionFilter === 'today') return isTodayDate(item.dueDate)
+      if (actionFilter === 'in_progress') return status === 'in_progress'
+      if (actionFilter === 'todo') return status === 'todo'
+      if (actionFilter === 'done') return status === 'done'
+      return true
+    })
     const contextAction = actionContextMenu
       ? activeItems.find((item) => item.id === actionContextMenu.itemId)
       : undefined
     const priorityAction = actionPriorityMenu
       ? activeItems.find((item) => item.id === actionPriorityMenu.itemId)
       : undefined
-
     return (
       <section className="knowledge-page knowledge-page-action has-sticky-action">
         <div className="knowledge-page-scroll">
@@ -2332,24 +2663,41 @@ export function NodeKnowledgePanel({
             </div>
           </div>
 
-          <div className="knowledge-action-list-head">
-            <strong>下一步行动</strong>
-            <div>
-              <span>预计完成时间</span>
-              <span>优先级</span>
+          <div className="knowledge-action-toolbar">
+            <div className="knowledge-action-filters">
+              {ACTION_FILTERS.map((filter) => (
+                <button
+                  key={filter.id}
+                  type="button"
+                  className={actionFilter === filter.id ? 'is-active' : ''}
+                  onClick={() => setActionFilter(filter.id)}
+                >
+                  {filter.label}{filter.id === 'all' ? `（${activeItems.length}）` : ''}
+                </button>
+              ))}
+            </div>
+            <div className="knowledge-action-tools">
+              <select value={actionSort} onChange={(event) => setActionSort(event.target.value as ActionSort)} title="排序方式">
+                <option value="dueDate">截止时间</option>
+                <option value="createdAt">创建时间</option>
+                <option value="priority">优先级</option>
+              </select>
+              <button type="button" className={actionView === 'list' ? 'is-active' : ''} title="列表视图" onClick={() => setActionView('list')}><List size={14} /></button>
+              <button type="button" className={actionView === 'card' ? 'is-active' : ''} title="卡片视图" onClick={() => setActionView('card')}><Grid2X2 size={14} /></button>
             </div>
           </div>
 
-          <div className="knowledge-action-list">
-            {orderedActions.map(({ item, depth }) => {
+          <div className={`knowledge-action-list is-${actionView}`}>
+            {visibleActions.map(({ item, depth }) => {
               const isEditing = editingItemId === item.id
-              const itemProgress = Math.max(0, Math.min(100, item.progress ?? 0))
+              const itemProgress = getActionProgress(item)
+              const itemStatus = getActionStatus(item.status)
               return (
                 <article
                   key={item.id}
-                  className={`knowledge-action-row${depth > 0 ? ' is-child' : ''}${selectedActionId === item.id ? ' is-selected' : ''}`}
+                  className={`knowledge-action-row${depth > 0 ? ' is-child' : ''}${selectedActionId === item.id ? ' is-selected' : ''}${itemStatus === 'done' ? ' is-done' : ''}`}
                   style={{ '--action-depth': Math.min(depth, 4) } as CSSProperties}
-                  onClick={() => setSelectedActionId(item.id)}
+                  onClick={() => toggleActionDetail(item.id)}
                   onDoubleClick={() => !isEditing && startEditItem(item)}
                   onContextMenu={(event) => !isEditing && openActionContextMenu(event, item.id)}
                 >
@@ -2361,18 +2709,13 @@ export function NodeKnowledgePanel({
                         title={item.status === 'done' ? '标记为未完成' : '标记为已完成'}
                         onClick={(event) => {
                           event.stopPropagation()
-                          updateItemPatch(item.id, { status: item.status === 'done' ? 'todo' : 'done', progress: item.status === 'done' ? 0 : 100 })
+                          updateItemPatch(item.id, { status: itemStatus === 'done' ? 'todo' : 'done', progress: itemStatus === 'done' ? 0 : 100 })
                         }}
                       >
-                        {item.status === 'done' && <Check size={13} />}
+                        {itemStatus === 'done' && <Check size={13} />}
                       </button>
                       <div className="knowledge-action-content">
                         <strong>{item.title}</strong>
-                        <p>{item.plainText || item.content || '描述这一步行动。'}</p>
-                        <div className="knowledge-action-progress-line">
-                          <div className="knowledge-progress-bar"><span style={{ width: `${itemProgress}%` }} /></div>
-                          <small>{itemProgress}%</small>
-                        </div>
                       </div>
                       <div className="knowledge-action-due">
                         <button
@@ -2396,7 +2739,6 @@ export function NodeKnowledgePanel({
                           onClick={(event) => event.stopPropagation()}
                           onChange={(event) => updateItemPatch(item.id, { dueDate: event.target.value })}
                         />
-                        <small>（{getDueDateHint(item.dueDate)}）</small>
                       </div>
                       <button
                         type="button"
@@ -2407,16 +2749,21 @@ export function NodeKnowledgePanel({
                         {item.priority === 'high' ? '高' : item.priority === 'low' ? '低' : '中'}
                         <ChevronDown size={12} />
                       </button>
+                      <span className={`knowledge-action-status is-${itemStatus}`}>{getActionStatusLabel(item.status)}</span>
+                      <div className="knowledge-action-compact-progress">
+                        <div className="knowledge-progress-bar"><span style={{ width: `${itemProgress}%` }} /></div>
+                        <small>{itemProgress}%</small>
+                      </div>
                     </>
                   )}
                 </article>
               )
             })}
-            {activeItems.length === 0 && (
+            {visibleActions.length === 0 && (
               <div className="knowledge-action-empty">
                 <Target size={24} />
-                <strong>还没有下一步行动</strong>
-                <p>把洞察转化为一个可执行、可验证的小行动。</p>
+                <strong>当前筛选下没有行动</strong>
+                <p>可以切换筛选条件，或新建一个可执行的小行动。</p>
               </div>
             )}
           </div>
@@ -2626,7 +2973,7 @@ export function NodeKnowledgePanel({
   return (
     <div
       ref={panelRef}
-      className="node-knowledge-panel knowledge-workbench"
+      className={`node-knowledge-panel knowledge-workbench${selectedAction ? ' has-external-action-detail' : ''}`}
       style={{
         ...style,
         width: panelWidth,
@@ -2650,6 +2997,7 @@ export function NodeKnowledgePanel({
         onMouseDown={startPanelResize}
       />
 
+      {renderExternalActionDetail()}
       {renderPanelToolbar()}
       <main
         className="knowledge-workbench-content"
