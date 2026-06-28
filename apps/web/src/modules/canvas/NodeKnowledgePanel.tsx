@@ -8,13 +8,13 @@ import { TextStyle } from '@tiptap/extension-text-style'
 import Underline from '@tiptap/extension-underline'
 import StarterKit from '@tiptap/starter-kit'
 import { EditorContent, useEditor } from '@tiptap/react'
+import { createPortal } from 'react-dom'
 import {
   Bold,
-  Bookmark,
-  BriefcaseBusiness,
   Calendar,
   Check,
   CheckCircle2,
+  ChevronDown,
   CircleHelp,
   ClipboardCheck,
   Filter,
@@ -30,10 +30,10 @@ import {
   MessageSquareText,
   MoreHorizontal,
   Palette,
+  Pencil,
   Plus,
   Quote,
   Redo2,
-  Share2,
   Target,
   Trash2,
   Type,
@@ -47,6 +47,8 @@ import type {
   NodeKnowledgeItem,
   NodeKnowledgeTag,
   NodeNote,
+  QuestionStatus,
+  QuestionTemplateType,
 } from '../../stores/useDocumentStore'
 import { getImageFilesFromClipboard, readImageFile } from './imageAttachments'
 
@@ -71,11 +73,20 @@ type KnowledgeDraft = {
   title: string
   content: string
   contentHtml: string
+  chain: string[]
 }
 
 type InspirationCategory = {
   name: string
   color: string
+}
+
+type QuestionFilter = 'all' | QuestionTemplateType
+
+type QuestionTemplate = {
+  type: QuestionTemplateType
+  title: string
+  description: string
 }
 
 type TagMenuState = {
@@ -88,6 +99,18 @@ type TagDialogState =
   | { type: 'create-generic'; value: string }
   | { type: 'delete'; tagId: string }
   | null
+
+type ChainContextMenuState = {
+  x: number
+  y: number
+  index: number
+} | null
+
+type ActionMenuState = {
+  x: number
+  y: number
+  itemId: string
+} | null
 
 type KnowledgeRichEditorProps = {
   initialHtml: string
@@ -107,6 +130,38 @@ const DEFAULT_INSPIRATION_CATEGORIES: InspirationCategory[] = [
   { name: '\u601d\u8003\u65b9\u5411', color: INSPIRATION_CATEGORY_COLORS[0] },
   { name: '\u884c\u52a8\u7075\u611f', color: INSPIRATION_CATEGORY_COLORS[1] },
   { name: '\u65b9\u6cd5\u63a2\u7d22', color: INSPIRATION_CATEGORY_COLORS[2] },
+]
+const QUESTION_CATEGORIES: Array<{ id: QuestionFilter; label: string }> = [
+  { id: 'all', label: '全部' },
+  { id: 'causal', label: '因果' },
+  { id: 'system', label: '系统' },
+  { id: 'completeness', label: '完整性' },
+  { id: 'overlap', label: '重叠性' },
+  { id: 'level', label: '层级' },
+  { id: 'verification', label: '验证' },
+]
+const QUESTION_STATUS_OPTIONS: Array<{ id: QuestionStatus; label: string }> = [
+  { id: 'not_started', label: '未开始' },
+  { id: 'to_think', label: '待思考' },
+  { id: 'in_progress', label: '进行中' },
+  { id: 'to_verify', label: '待验证' },
+  { id: 'resolved', label: '已解决' },
+  { id: 'converted_to_action', label: '已转行动' },
+]
+const DEFAULT_QUESTION_TEMPLATES: QuestionTemplate[] = [
+  { type: 'causal', title: '这个结果的最近因是什么？', description: '当前出现的结果，最直接的原因是什么？还能继续往前追到更底层的因吗？' },
+  { type: 'causal', title: '如果这个因持续存在，会带来什么结果？', description: '从短期、中期、长期推演结果，帮助判断风险与影响。' },
+  { type: 'causal', title: '如果改变这个因，会带来哪些新的果？', description: '评估改变当前因之后，结果会如何变化，是否值得优先干预。' },
+  { type: 'causal', title: '这个果背后是否有多个并列的因？', description: '检查当前结果是否由多个关键原因共同作用，而不只是单一因。' },
+  { type: 'causal', title: '这个因的因是什么？', description: '继续向前追问，找到更深一层的上游原因。' },
+  { type: 'causal', title: '这个因与其他因是并列关系，还是因果链关系？', description: '判断节点之间是同层并列，还是前后相继的因果关系。' },
+  { type: 'system', title: '它和哪些节点形成反馈循环？', description: '检查节点之间是否存在相互强化或相互抑制的反馈关系。' },
+  { type: 'system', title: '它处在什么更大的系统中？', description: '把当前节点放回更大的环境与关系网络中观察。' },
+  { type: 'completeness', title: '当前拆分是否遗漏关键因素？', description: '检查是否还有未被纳入、但足以影响结论的重要维度。' },
+  { type: 'overlap', title: '这些子节点之间是否有重叠？', description: '检查不同节点是否表达了同一件事，分类标准是否统一。' },
+  { type: 'level', title: '这些节点是否处于同一层级？', description: '检查是否把原因、方法、案例或结果混在同一层。' },
+  { type: 'verification', title: '我如何验证这个模型在现实中成立？', description: '明确需要观察的现象、案例或数据，让模型能够被检验。' },
+  { type: 'verification', title: '有没有反例能推翻或修正这个模型？', description: '主动寻找反例，识别模型成立的边界与需要修正之处。' },
 ]
 const TAG_TEMPLATES: NodeKnowledgeTag[] = [
   {
@@ -180,12 +235,42 @@ const TAG_TEMPLATES: NodeKnowledgeTag[] = [
 
 const DEFAULT_TAG_IDS = new Set(['quote', 'reflection'])
 const PROTECTED_TAG_IDS = new Set(['quote'])
+
+function getQuestionType(item: NodeKnowledgeItem): QuestionTemplateType {
+  if (item.questionType) return item.questionType
+  const matchedCategory = QUESTION_CATEGORIES.find((category) => category.id !== 'all' && item.tags?.includes(category.label))
+  return matchedCategory && matchedCategory.id !== 'all' ? matchedCategory.id : 'causal'
+}
+
+function getQuestionStatus(status?: NodeKnowledgeItem['status']): QuestionStatus {
+  if (status === 'done' || status === 'resolved') return 'resolved'
+  if (status === 'active' || status === 'in_progress') return 'in_progress'
+  if (status === 'paused' || status === 'to_verify') return 'to_verify'
+  if (status === 'converted_to_action') return 'converted_to_action'
+  if (status === 'not_started') return 'not_started'
+  return 'to_think'
+}
+
+function getQuestionCategoryLabel(type: QuestionTemplateType) {
+  return QUESTION_CATEGORIES.find((category) => category.id === type)?.label ?? '因果'
+}
+
+function getQuestionStatusLabel(status?: NodeKnowledgeItem['status']) {
+  const normalized = getQuestionStatus(status)
+  return QUESTION_STATUS_OPTIONS.find((option) => option.id === normalized)?.label ?? '待思考'
+}
+
+function getDueDateHint(dueDate?: string) {
+  if (!dueDate) return '未设置'
+  const due = new Date(`${dueDate}T00:00:00`)
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const days = Math.round((due.getTime() - today.getTime()) / (24 * 60 * 60 * 1000))
+  if (days === 0) return '今天'
+  if (days > 0) return `${days}天后`
+  return `逾期${Math.abs(days)}天`
+}
 const DEFAULT_TAGS = TAG_TEMPLATES.filter((tag) => DEFAULT_TAG_IDS.has(tag.id))
-const CASE_PLACEHOLDER_IMAGES = [
-  'https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=420&q=80',
-  'https://images.unsplash.com/photo-1552664730-d307ca884978?auto=format&fit=crop&w=420&q=80',
-  'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=420&q=80',
-]
 const KNOWLEDGE_TEXT_COLORS = [
   '#f8fafc',
   '#e2e8f0',
@@ -415,6 +500,13 @@ function getKnowledgeItems(selectedNode: BaseNode): NodeKnowledgeItem[] {
         priority: item.priority,
         progress: item.progress,
         dueDate: item.dueDate,
+        questionType: item.questionType,
+        convertedActionId: item.convertedActionId,
+        parentActionId: item.parentActionId,
+        linkedNodeIds: item.linkedNodeIds,
+        linkedQuoteIds: item.linkedQuoteIds,
+        linkedCaseIds: item.linkedCaseIds,
+        sortOrder: item.sortOrder,
         imageSrc: item.imageSrc,
         imageAlt: item.imageAlt,
         chain: item.chain,
@@ -798,7 +890,21 @@ export function NodeKnowledgePanel({
   const [panelWidth, setPanelWidth] = useState(() => getPanelWidthFromStyle(style))
   const [activeTagId, setActiveTagId] = useState('quote')
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
-  const [draft, setDraft] = useState<KnowledgeDraft>({ title: '', content: '', contentHtml: '<p></p>' })
+  const [draft, setDraft] = useState<KnowledgeDraft>({ title: '', content: '', contentHtml: '<p></p>', chain: [] })
+  const [draggingChainIndex, setDraggingChainIndex] = useState<number | null>(null)
+  const [editingChainIndex, setEditingChainIndex] = useState<number | null>(null)
+  const [chainContextMenu, setChainContextMenu] = useState<ChainContextMenuState>(null)
+  const [questionFilter, setQuestionFilter] = useState<QuestionFilter>('all')
+  const [questionView, setQuestionView] = useState<'list' | 'grid'>('list')
+  const [questionSort, setQuestionSort] = useState<'desc' | 'asc'>('desc')
+  const [questionDraftType, setQuestionDraftType] = useState<QuestionTemplateType>('causal')
+  const [questionDraftStatus, setQuestionDraftStatus] = useState<QuestionStatus>('to_think')
+  const [actionDraftDueDate, setActionDraftDueDate] = useState('')
+  const [actionDraftPriority, setActionDraftPriority] = useState<'high' | 'medium' | 'low'>('medium')
+  const [actionDraftProgress, setActionDraftProgress] = useState(0)
+  const [selectedActionId, setSelectedActionId] = useState<string | null>(null)
+  const [actionContextMenu, setActionContextMenu] = useState<ActionMenuState>(null)
+  const [actionPriorityMenu, setActionPriorityMenu] = useState<ActionMenuState>(null)
   const [inspirationDraft, setInspirationDraft] = useState('')
   const [newInspirationCategory, setNewInspirationCategory] = useState('')
   const [tagMenu, setTagMenu] = useState<TagMenuState>(null)
@@ -820,7 +926,20 @@ export function NodeKnowledgePanel({
     setActiveTagId('quote')
     setEditingItemId(null)
     setQuoteActionMenuId(null)
-    setDraft({ title: '', content: '', contentHtml: '<p></p>' })
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+    setQuestionFilter('all')
+    setQuestionView('list')
+    setQuestionSort('desc')
+    setQuestionDraftType('causal')
+    setQuestionDraftStatus('to_think')
+    setActionDraftDueDate('')
+    setActionDraftPriority('medium')
+    setActionDraftProgress(0)
+    setSelectedActionId(null)
+    setActionContextMenu(null)
+    setActionPriorityMenu(null)
+    setDraft({ title: '', content: '', contentHtml: '<p></p>', chain: [] })
     setInspirationDraft('')
     setNewInspirationCategory('')
   }, [selectedNode.id])
@@ -842,6 +961,41 @@ export function NodeKnowledgePanel({
   useEffect(() => {
     latestPanelWidthRef.current = panelWidth
   }, [panelWidth])
+
+  useEffect(() => {
+    if (!chainContextMenu) return
+
+    const closeMenu = () => setChainContextMenu(null)
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenu()
+    }
+
+    document.addEventListener('mousedown', closeMenu)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeMenu)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [chainContextMenu])
+
+  useEffect(() => {
+    if (!actionContextMenu && !actionPriorityMenu) return
+
+    const closeMenus = () => {
+      setActionContextMenu(null)
+      setActionPriorityMenu(null)
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeMenus()
+    }
+
+    document.addEventListener('mousedown', closeMenus)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeMenus)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [actionContextMenu, actionPriorityMenu])
 
   const persistKnowledgeState = (nextTags: NodeKnowledgeTag[], nextItems: NodeKnowledgeItem[]) => {
     const legacyNotes = toLegacyNotes(nextItems)
@@ -915,33 +1069,98 @@ export function NodeKnowledgePanel({
           : activeTag.kind === 'case'
             ? ['\u56e0\u679c\u94fe']
             : [],
-      status: activeTag.kind === 'action' || activeTag.kind === 'question' ? 'todo' : undefined,
+      status: activeTag.kind === 'action' ? 'todo' : activeTag.kind === 'question' ? 'to_think' : undefined,
       priority: activeTag.kind === 'action' ? 'medium' : undefined,
       progress: activeTag.kind === 'action' ? 0 : undefined,
       dueDate: activeTag.kind === 'action' ? new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10) : undefined,
-      imageSrc: activeTag.kind === 'case' ? CASE_PLACEHOLDER_IMAGES[items.filter((item) => item.contentType === 'case').length % CASE_PLACEHOLDER_IMAGES.length] : undefined,
-      imageAlt: activeTag.kind === 'case' ? '案例图片' : undefined,
       chain: activeTag.kind === 'case' ? ['触发因素', '过程变化', '结果'] : undefined,
+      questionType: activeTag.kind === 'question' ? (questionFilter === 'all' ? 'causal' : questionFilter) : undefined,
+      sortOrder: activeTag.kind === 'question' ? items.filter((item) => item.tagId === activeTag.id).length : undefined,
       createdAt: now,
       updatedAt: now,
     }
     persistKnowledgeState(tags, [newItem, ...items])
     setEditingItemId(newItem.id)
     setQuoteActionMenuId(null)
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+    if (newItem.contentType === 'question') {
+      setQuestionDraftType(newItem.questionType ?? 'causal')
+      setQuestionDraftStatus('to_think')
+    }
+    if (newItem.contentType === 'action') {
+      setActionDraftDueDate(newItem.dueDate ?? '')
+      setActionDraftPriority(newItem.priority ?? 'medium')
+      setActionDraftProgress(newItem.progress ?? 0)
+    }
     setDraft({
       title: newItem.title,
       content: '',
       contentHtml: newItem.contentHtml ?? '<p></p>',
+      chain: newItem.chain ?? [],
     })
   }
 
   const startEditItem = (item: NodeKnowledgeItem) => {
     setEditingItemId(item.id)
     setQuoteActionMenuId(null)
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+    setActionContextMenu(null)
+    setActionPriorityMenu(null)
+    if (item.contentType === 'question') {
+      setQuestionDraftType(getQuestionType(item))
+      setQuestionDraftStatus(getQuestionStatus(item.status))
+    }
+    if (item.contentType === 'action') {
+      setSelectedActionId(item.id)
+      setActionDraftDueDate(item.dueDate ?? '')
+      setActionDraftPriority(item.priority ?? 'medium')
+      setActionDraftProgress(item.progress ?? 0)
+    }
     setDraft({
       title: item.title,
       content: item.plainText ?? item.content,
       contentHtml: item.contentHtml ?? plainTextToHtml(item.content),
+      chain: item.chain ?? (item.contentType === 'case' ? ['触发因素', '过程变化', '结果'] : []),
+    })
+  }
+
+  const startCreateAction = (parentActionId?: string) => {
+    if (!activeTag || activeTag.kind !== 'action') return
+    const now = Date.now()
+    const dueDate = new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    const newItem: NodeKnowledgeItem = {
+      id: createKnowledgeId('action'),
+      tagId: activeTag.id,
+      contentType: 'action',
+      title: parentActionId ? '新的子行动' : '新的行动',
+      content: '',
+      contentHtml: '<p>把这个节点转化成一个可以执行的小行动。</p>',
+      plainText: '',
+      status: 'todo',
+      priority: 'medium',
+      progress: 0,
+      dueDate,
+      parentActionId,
+      sortOrder: activeItems.length,
+      createdAt: now,
+      updatedAt: now,
+    }
+    persistKnowledgeState(tags, [newItem, ...items])
+    setSelectedActionId(newItem.id)
+    setEditingItemId(newItem.id)
+    setQuoteActionMenuId(null)
+    setActionContextMenu(null)
+    setActionPriorityMenu(null)
+    setActionDraftDueDate(dueDate)
+    setActionDraftPriority('medium')
+    setActionDraftProgress(0)
+    setDraft({
+      title: newItem.title,
+      content: '',
+      contentHtml: newItem.contentHtml ?? '<p></p>',
+      chain: [],
     })
   }
 
@@ -953,7 +1172,10 @@ export function NodeKnowledgePanel({
     }
     setEditingItemId(null)
     setQuoteActionMenuId(null)
-    setDraft({ title: '', content: '', contentHtml: '<p></p>' })
+    setDraggingChainIndex(null)
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+    setDraft({ title: '', content: '', contentHtml: '<p></p>', chain: [] })
   }
 
   const saveEditItem = () => {
@@ -969,22 +1191,56 @@ export function NodeKnowledgePanel({
         content: plainText,
         contentHtml: normalizeEditorHtml(draft.contentHtml || plainTextToHtml(plainText)),
         plainText,
-        tags: item.contentType === 'inspiration' ? [nextTitle] : item.tags,
+        chain: item.contentType === 'case'
+          ? draft.chain.map((step) => step.trim()).filter(Boolean)
+          : item.chain,
+        questionType: item.contentType === 'question' ? questionDraftType : item.questionType,
+        status: item.contentType === 'question' ? questionDraftStatus : item.status,
+        tags: item.contentType === 'question' ? [getQuestionCategoryLabel(questionDraftType)] : item.contentType === 'inspiration' ? [nextTitle] : item.tags,
+        dueDate: item.contentType === 'action' ? actionDraftDueDate : item.dueDate,
+        priority: item.contentType === 'action' ? actionDraftPriority : item.priority,
+        progress: item.contentType === 'action' ? actionDraftProgress : item.progress,
         updatedAt: now,
       }
     })
     persistKnowledgeState(tags, nextItems)
     setEditingItemId(null)
     setQuoteActionMenuId(null)
+    setDraggingChainIndex(null)
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
   }
 
   const deleteItem = (itemId: string) => {
-    persistKnowledgeState(tags, items.filter((item) => item.id !== itemId))
+    const deletingItem = items.find((item) => item.id === itemId)
+    const deletingIds = new Set([itemId])
+    if (deletingItem?.contentType === 'action') {
+      let foundChild = true
+      while (foundChild) {
+        foundChild = false
+        items.forEach((item) => {
+          if (item.parentActionId && deletingIds.has(item.parentActionId) && !deletingIds.has(item.id)) {
+            deletingIds.add(item.id)
+            foundChild = true
+          }
+        })
+      }
+    }
+    persistKnowledgeState(tags, items.filter((item) => !deletingIds.has(item.id)))
     if (editingItemId === itemId) {
       setEditingItemId(null)
     }
     if (quoteActionMenuId === itemId) {
       setQuoteActionMenuId(null)
+    }
+    if (selectedActionId && deletingIds.has(selectedActionId)) {
+      setSelectedActionId(null)
+    }
+    if (actionContextMenu && deletingIds.has(actionContextMenu.itemId)) {
+      setActionContextMenu(null)
+    }
+    if (actionPriorityMenu && deletingIds.has(actionPriorityMenu.itemId)) {
+      setActionPriorityMenu(null)
     }
   }
 
@@ -1140,9 +1396,102 @@ export function NodeKnowledgePanel({
     window.addEventListener('blur', stopResize, { once: true })
   }
 
+  const focusChainStep = (index: number) => {
+    requestAnimationFrame(() => {
+      const input = panelRef.current?.querySelector<HTMLTextAreaElement>(`[data-chain-index="${index}"]`)
+      input?.focus()
+      input?.setSelectionRange(input.value.length, input.value.length)
+    })
+  }
+
+  const updateChainStep = (index: number, value: string) => {
+    setDraft((current) => ({
+      ...current,
+      chain: current.chain.map((step, stepIndex) => stepIndex === index ? value : step),
+    }))
+  }
+
+  const addChainStep = (afterIndex = draft.chain.length - 1) => {
+    const insertIndex = Math.max(0, Math.min(draft.chain.length, afterIndex + 1))
+    setDraft((current) => {
+      const nextChain = [...current.chain]
+      nextChain.splice(insertIndex, 0, '')
+      return { ...current, chain: nextChain }
+    })
+    setEditingChainIndex(insertIndex)
+    setChainContextMenu(null)
+    focusChainStep(insertIndex)
+  }
+
+  const removeChainStep = (index: number) => {
+    setDraft((current) => ({
+      ...current,
+      chain: current.chain.filter((_, stepIndex) => stepIndex !== index),
+    }))
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+  }
+
+  const moveChainStep = (fromIndex: number, toIndex: number) => {
+    if (fromIndex === toIndex) return
+    setDraft((current) => {
+      const nextChain = [...current.chain]
+      const [movedStep] = nextChain.splice(fromIndex, 1)
+      nextChain.splice(toIndex, 0, movedStep)
+      return { ...current, chain: nextChain }
+    })
+    setDraggingChainIndex(null)
+    setEditingChainIndex(null)
+    setChainContextMenu(null)
+  }
+
+  const openChainContextMenu = (event: ReactMouseEvent, index: number) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const menuWidth = 132
+    const menuHeight = 82
+    setChainContextMenu({
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+      index,
+    })
+  }
+
+  const startEditChainStep = (index: number) => {
+    setEditingChainIndex(index)
+    setChainContextMenu(null)
+    focusChainStep(index)
+  }
+
+  const openActionContextMenu = (event: ReactMouseEvent, itemId: string) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setSelectedActionId(itemId)
+    setActionPriorityMenu(null)
+    setActionContextMenu({
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 158)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 126)),
+      itemId,
+    })
+  }
+
+  const openActionPriorityMenu = (event: ReactMouseEvent<HTMLButtonElement>, itemId: string) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const rect = event.currentTarget.getBoundingClientRect()
+    setActionContextMenu(null)
+    setActionPriorityMenu({
+      x: Math.max(8, Math.min(rect.right - 92, window.innerWidth - 100)),
+      y: Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 126)),
+      itemId,
+    })
+  }
+
   const renderItemEditor = (item: NodeKnowledgeItem) => {
     const compact = item.contentType === 'inspiration'
     const isQuoteItem = item.contentType === 'quote'
+    const isQuestionItem = item.contentType === 'question'
+    const isActionItem = item.contentType === 'action'
     return (
       <div className="knowledge-item-editor">
         <input
@@ -1151,6 +1500,54 @@ export function NodeKnowledgePanel({
           onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
           placeholder={isQuoteItem ? '\u2014\u2014\u300a\u4e66\u540d\u300b\uff0c\u7b2c x \u9875' : '\u6807\u9898'}
         />
+        {isQuestionItem && (
+          <div className="knowledge-question-editor-meta">
+            <label>
+              <span>追问类型</span>
+              <select value={questionDraftType} onChange={(event) => setQuestionDraftType(event.target.value as QuestionTemplateType)}>
+                {QUESTION_CATEGORIES.filter((category) => category.id !== 'all').map((category) => (
+                  <option key={category.id} value={category.id}>{category.label}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>当前状态</span>
+              <select value={questionDraftStatus} onChange={(event) => setQuestionDraftStatus(event.target.value as QuestionStatus)}>
+                {QUESTION_STATUS_OPTIONS.map((status) => (
+                  <option key={status.id} value={status.id}>{status.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {isActionItem && (
+          <div className="knowledge-action-editor-meta">
+            <label>
+              <span>预计完成</span>
+              <input type="date" value={actionDraftDueDate} onChange={(event) => setActionDraftDueDate(event.target.value)} />
+            </label>
+            <label>
+              <span>优先级</span>
+              <select value={actionDraftPriority} onChange={(event) => setActionDraftPriority(event.target.value as 'high' | 'medium' | 'low')}>
+                <option value="high">高</option>
+                <option value="medium">中</option>
+                <option value="low">低</option>
+              </select>
+            </label>
+            <label className="knowledge-action-progress-input">
+              <span>完成进度</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                step="10"
+                value={actionDraftProgress}
+                onChange={(event) => setActionDraftProgress(Number(event.target.value))}
+              />
+              <strong>{actionDraftProgress}%</strong>
+            </label>
+          </div>
+        )}
         {compact ? (
           <textarea
             className="knowledge-quick-textarea"
@@ -1175,6 +1572,113 @@ export function NodeKnowledgePanel({
             onChange={(payload) => setDraft((current) => ({ ...current, content: payload.text, contentHtml: payload.html }))}
           />
         )}
+        {item.contentType === 'case' && (
+          <section className="knowledge-case-chain-editor">
+            <div className="knowledge-case-chain-editor-head">
+              <div>
+                <strong>因果链条</strong>
+                <span>回车新增步骤，也可粘贴“原因 → 过程 → 结果”</span>
+              </div>
+              <button type="button" title="添加步骤" onClick={() => addChainStep()}>
+                <Plus size={14} />
+              </button>
+            </div>
+            <div className="knowledge-case-chain-editor-list">
+              {draft.chain.map((step, index) => (
+                <div
+                  key={`chain-step-${index}`}
+                  className={`knowledge-case-chain-step${draggingChainIndex === index ? ' is-dragging' : ''}${editingChainIndex === index ? ' is-editing' : ''}`}
+                  draggable={editingChainIndex !== index}
+                  onDragStart={(event) => {
+                    event.dataTransfer.effectAllowed = 'move'
+                    setDraggingChainIndex(index)
+                    setChainContextMenu(null)
+                  }}
+                  onDragEnd={() => setDraggingChainIndex(null)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    if (draggingChainIndex !== null) moveChainStep(draggingChainIndex, index)
+                  }}
+                  onContextMenu={(event) => openChainContextMenu(event, index)}
+                >
+                  {editingChainIndex === index ? (
+                    <textarea
+                      data-chain-index={index}
+                      rows={1}
+                      value={step}
+                      style={{ width: `${Math.min(28, Math.max(8, step.length + 2))}ch` }}
+                      onChange={(event) => updateChainStep(index, event.target.value)}
+                      onBlur={() => setEditingChainIndex(null)}
+                      onPaste={(event) => {
+                        const pastedText = event.clipboardData.getData('text/plain')
+                        const pastedSteps = pastedText
+                          .split(/\s*(?:→|->|=>)\s*/)
+                          .map((value) => value.trim())
+                          .filter(Boolean)
+                        if (pastedSteps.length < 2) return
+                        event.preventDefault()
+                        setDraft((current) => {
+                          const nextChain = [...current.chain]
+                          nextChain.splice(index, 1, ...pastedSteps)
+                          return { ...current, chain: nextChain }
+                        })
+                        setEditingChainIndex(index + pastedSteps.length - 1)
+                        focusChainStep(index + pastedSteps.length - 1)
+                      }}
+                      onKeyDown={(event) => {
+                        event.stopPropagation()
+                        if (event.nativeEvent.isComposing) return
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          setEditingChainIndex(null)
+                        }
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault()
+                          addChainStep(index)
+                          setEditingChainIndex(index + 1)
+                        }
+                        if (event.key === 'Backspace' && !step && draft.chain.length > 1) {
+                          event.preventDefault()
+                          removeChainStep(index)
+                        }
+                      }}
+                      placeholder={`步骤 ${index + 1}`}
+                    />
+                  ) : (
+                    <span className="knowledge-case-chain-label">{step || `步骤 ${index + 1}`}</span>
+                  )}
+                  {index < draft.chain.length - 1 && <span className="knowledge-case-chain-arrow">→</span>}
+                </div>
+              ))}
+              {draft.chain.length === 0 && (
+                <button type="button" className="knowledge-case-chain-empty" onClick={() => addChainStep()}>
+                  <Plus size={14} /> 添加第一个步骤
+                </button>
+              )}
+            </div>
+            {chainContextMenu && createPortal(
+              <div
+                className="knowledge-case-chain-menu"
+                style={{ left: chainContextMenu.x, top: chainContextMenu.y }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                }}
+              >
+                <button type="button" onClick={() => startEditChainStep(chainContextMenu.index)}>
+                  <Pencil size={13} /> 编辑
+                </button>
+                <button type="button" className="is-danger" onClick={() => removeChainStep(chainContextMenu.index)}>
+                  <Trash2 size={13} /> 删除
+                </button>
+              </div>,
+              document.body,
+            )}
+          </section>
+        )}
         <div className="knowledge-item-editor-actions">
           <button type="button" onClick={cancelEditItem}>取消</button>
           <button type="button" className="is-primary" onClick={saveEditItem}><Check size={14} /> 保存</button>
@@ -1186,6 +1690,68 @@ export function NodeKnowledgePanel({
   const updateItemPatch = (itemId: string, patch: Partial<NodeKnowledgeItem>) => {
     const nextItems = items.map((item) => item.id === itemId ? { ...item, ...patch, updatedAt: Date.now() } : item)
     persistKnowledgeState(tags, nextItems)
+  }
+
+  const generateQuestionTemplates = (filter: QuestionFilter) => {
+    if (!activeTag || activeTag.kind !== 'question') return
+    const templates = DEFAULT_QUESTION_TEMPLATES.filter((template) => filter === 'all' || template.type === filter)
+    const existingTitles = new Set(activeItems.map((item) => item.title.trim()))
+    const now = Date.now()
+    const generatedItems = templates
+      .filter((template) => !existingTitles.has(template.title))
+      .map((template, index): NodeKnowledgeItem => ({
+        id: createKnowledgeId('question'),
+        tagId: activeTag.id,
+        contentType: 'question',
+        title: template.title,
+        content: template.description,
+        contentHtml: plainTextToHtml(template.description),
+        plainText: template.description,
+        tags: [getQuestionCategoryLabel(template.type)],
+        status: 'not_started',
+        questionType: template.type,
+        sortOrder: activeItems.length + index,
+        createdAt: now + index,
+        updatedAt: now + index,
+      }))
+    if (generatedItems.length === 0) return
+    persistKnowledgeState(tags, [...generatedItems, ...items])
+  }
+
+  const convertQuestionToAction = (item: NodeKnowledgeItem) => {
+    const now = Date.now()
+    let actionTag = tags.find((tag) => tag.kind === 'action')
+    let nextTags = tags
+    if (!actionTag) {
+      const actionTemplate = TAG_TEMPLATES.find((tag) => tag.id === 'action')
+      if (!actionTemplate) return
+      actionTag = { ...actionTemplate, createdAt: now, updatedAt: now }
+      nextTags = [...tags, actionTag].sort((left, right) => left.sortOrder - right.sortOrder)
+    }
+
+    const actionId = createKnowledgeId('action')
+    const actionItem: NodeKnowledgeItem = {
+      id: actionId,
+      tagId: actionTag.id,
+      contentType: 'action',
+      title: item.title,
+      content: item.plainText || item.content,
+      contentHtml: item.contentHtml ?? plainTextToHtml(item.plainText || item.content),
+      plainText: item.plainText || item.content,
+      status: 'todo',
+      priority: 'medium',
+      progress: 0,
+      dueDate: new Date(now + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+      createdAt: now,
+      updatedAt: now,
+    }
+    const nextItems = items.map((current) => current.id === item.id
+      ? { ...current, status: 'converted_to_action' as QuestionStatus, convertedActionId: actionId, updatedAt: now }
+      : current
+    )
+    persistKnowledgeState(nextTags, [actionItem, ...nextItems])
+    setQuoteActionMenuId(null)
+    setActiveTagId(actionTag.id)
   }
 
   const formatItemTime = (time: number) => new Date(time).toLocaleString('zh-CN', {
@@ -1546,137 +2112,361 @@ export function NodeKnowledgePanel({
   )
 
   const renderCasePage = () => (
-    <section className="knowledge-page knowledge-page-case">
-      <div className="knowledge-case-list">
-        {activeItems.map((item, index) => {
-          const isEditing = editingItemId === item.id
-          return (
-            <article key={item.id} className="knowledge-case-card">
-              {isEditing ? renderItemEditor(item) : (
-                <>
-                  <div className="knowledge-case-media">
-                    {item.imageSrc ? <img src={item.imageSrc} alt={item.imageAlt ?? item.title} /> : <BriefcaseBusiness size={28} />}
-                  </div>
+    <section className="knowledge-page knowledge-page-case has-sticky-action">
+      <div className="knowledge-page-scroll">
+        <div className="knowledge-case-list">
+          {activeItems.map((item, index) => {
+            const isEditing = editingItemId === item.id
+            return (
+              <article key={item.id} className="knowledge-case-card">
+                {isEditing ? renderItemEditor(item) : (
                   <div className="knowledge-case-body">
                     <div className="knowledge-card-head">
                       <strong><span>案例 {String(index + 1).padStart(2, '0')}</span>{item.title}</strong>
-                      <div>
-                        <button type="button"><Bookmark size={15} /></button>
-                        <button type="button"><Share2 size={15} /></button>
-                        <button type="button" onClick={() => startEditItem(item)}><MoreHorizontal size={16} /></button>
+                      <div className="knowledge-quote-row-actions">
+                        <button
+                          type="button"
+                          className="knowledge-quote-more"
+                          title="更多操作"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setQuoteActionMenuId((current) => current === item.id ? null : item.id)
+                          }}
+                        >
+                          <MoreHorizontal size={16} />
+                        </button>
+                        {quoteActionMenuId === item.id && (
+                          <div className="knowledge-quote-action-menu">
+                            <button type="button" onClick={() => startEditItem(item)}>编辑</button>
+                            <button type="button" className="is-danger" onClick={() => deleteItem(item.id)}><Trash2 size={13} /> 删除</button>
+                          </div>
+                        )}
                       </div>
                     </div>
                     <p>{item.plainText || item.content || '\u8bb0\u5f55\u6848\u4f8b\u80cc\u666f\u3001\u53d1\u751f\u94fe\u8def\u548c\u7ed3\u8bba\u3002'}</p>
                     <div className="knowledge-chain-row">
-                      {(item.chain && item.chain.length > 0 ? item.chain : ['会议准备不足', '会议延期', '信息同步滞后', '决策延迟']).map((step, stepIndex, array) => (
+                      {(item.chain && item.chain.length > 0 ? item.chain : ['触发因素', '过程变化', '结果']).map((step, stepIndex, array) => (
                         <span key={`${step}-${stepIndex}`}>{step}{stepIndex < array.length - 1 && <em>→</em>}</span>
                       ))}
                     </div>
                   </div>
-                </>
-              )}
-            </article>
-          )
-        })}
-      </div>
-      <button type="button" className="knowledge-workbench-add" onClick={startCreateItem}><Plus size={16} /> 新建案例</button>
-      <div className="knowledge-workbench-count">共 {activeItems.length} 个案例</div>
-    </section>
-  )
-
-  const renderQuestionPage = () => (
-    <section className="knowledge-page knowledge-page-question">
-      <div className="knowledge-page-toolbar">
-        <strong><CircleHelp size={18} /> 追问</strong>
-        <div>
-          <button type="button">按创建时间</button>
-          <button type="button"><List size={14} /></button>
-        </div>
-      </div>
-      <div className="knowledge-question-list">
-        {activeItems.map((item, index) => {
-          const isEditing = editingItemId === item.id
-          return (
-            <article key={item.id} className="knowledge-question-row">
-              {isEditing ? renderItemEditor(item) : (
-                <>
-                  <span className="knowledge-node-index">{String(index + 1).padStart(2, '0')}</span>
-                  <div>
-                    <strong>{item.title}</strong>
-                    <p>{item.plainText || item.content || '\u7ee7\u7eed\u62c6\u89e3\u8fd9\u4e2a\u8282\u70b9\u80cc\u540e\u7684\u539f\u56e0\u3001\u6761\u4ef6\u6216\u53cd\u4f8b\u3002'}</p>
-                    <div className="knowledge-chip-row">
-                      <span className={`is-status-${item.status ?? 'todo'}`}>{item.status === 'done' ? '\u5df2\u601d\u8003' : item.status === 'active' ? '\u8fdb\u884c\u4e2d' : '\u5f85\u601d\u8003'}</span>
-                      {(item.tags ?? ['模式觉察']).map((tag) => <span key={tag}>{tag}</span>)}
-                    </div>
-                  </div>
-                  <div className="knowledge-row-actions">
-                    <button type="button" onClick={() => updateItemPatch(item.id, { status: item.status === 'done' ? 'todo' : 'done' })}><CheckCircle2 size={14} /> {item.status === 'done' ? '\u53d6\u6d88\u6807\u8bb0' : '\u6807\u8bb0\u5df2\u601d\u8003'}</button>
-                    <button type="button" onClick={() => {
-                      const actionTag = tags.find((tag) => tag.id === 'action')
-                      if (!actionTag) return
-                      updateItemPatch(item.id, { tagId: actionTag.id, contentType: 'action', status: 'todo', priority: 'medium', progress: 0 })
-                      setActiveTagId(actionTag.id)
-                    }}><ClipboardCheck size={14} /> 转为行动</button>
-                    <button type="button" onClick={() => startEditItem(item)}>继续拆解</button>
-                    <button type="button" onClick={() => deleteItem(item.id)}><MoreHorizontal size={15} /></button>
-                  </div>
-                </>
-              )}
-            </article>
-          )
-        })}
-      </div>
-      <button type="button" className="knowledge-workbench-add" onClick={startCreateItem}><Plus size={16} /> 新建追问</button>
-    </section>
-  )
-
-  const renderActionPage = () => {
-    const doneCount = activeItems.filter((item) => item.status === 'done').length
-    const progress = activeItems.length === 0 ? 0 : Math.round(doneCount / activeItems.length * 100)
-    return (
-      <section className="knowledge-page knowledge-page-action">
-        <div className="knowledge-action-goal">
-          <div>
-            <strong><Target size={18} /> 行动目标</strong>
-            <p>将因果洞察转化为具体行动，打破模式，建立新的回应方式。</p>
-          </div>
-          <div className="knowledge-progress-ring" style={{ '--progress': `${progress}%` } as CSSProperties}>
-            <span>{progress}%</span>
-          </div>
-          <small>{doneCount} / {activeItems.length} 已完成</small>
-        </div>
-        <div className="knowledge-action-list">
-          {activeItems.map((item) => {
-            const isEditing = editingItemId === item.id
-            return (
-              <article key={item.id} className="knowledge-action-row">
-                {isEditing ? renderItemEditor(item) : (
-                  <>
-                    <button
-                      type="button"
-                      className={`knowledge-check${item.status === 'done' ? ' is-checked' : ''}`}
-                      onClick={() => updateItemPatch(item.id, { status: item.status === 'done' ? 'todo' : 'done', progress: item.status === 'done' ? 0 : 100 })}
-                    >
-                      {item.status === 'done' && <Check size={13} />}
-                    </button>
-                    <div>
-                      <strong>{item.title}</strong>
-                      <p>{item.plainText || item.content || '\u63cf\u8ff0\u8fd9\u4e00\u6b65\u884c\u52a8\u3002'}</p>
-                      <div className="knowledge-progress-bar"><span style={{ width: `${Math.max(0, Math.min(100, item.progress ?? 0))}%` }} /></div>
-                    </div>
-                    <div className="knowledge-action-meta">
-                      <span><Calendar size={14} /> {item.dueDate ?? '\u672a\u8bbe\u7f6e'}</span>
-                      <em className={`is-priority-${item.priority ?? 'medium'}`}>{item.priority === 'high' ? '\u9ad8' : item.priority === 'low' ? '\u4f4e' : '\u4e2d'}</em>
-                      <button type="button" onClick={() => startEditItem(item)}>编辑</button>
-                    </div>
-                  </>
                 )}
               </article>
             )
           })}
         </div>
-        <button type="button" className="knowledge-workbench-add is-dashed" onClick={startCreateItem}><Plus size={16} /> 添加子行动</button>
-        <button type="button" className="knowledge-workbench-add" onClick={startCreateItem}><Plus size={16} /> 新建行动</button>
+      </div>
+      <div className="knowledge-sticky-add">
+        <button type="button" className="knowledge-workbench-add" onClick={startCreateItem}><Plus size={16} /> 新建案例</button>
+        <div className="knowledge-workbench-count">共 {activeItems.length} 个案例</div>
+      </div>
+    </section>
+  )
+
+  const renderQuestionPage = () => {
+    const filteredItems = activeItems
+      .filter((item) => questionFilter === 'all' || getQuestionType(item) === questionFilter)
+      .sort((left, right) => questionSort === 'desc'
+        ? right.createdAt - left.createdAt
+        : left.createdAt - right.createdAt
+      )
+    const filterLabel = QUESTION_CATEGORIES.find((category) => category.id === questionFilter)?.label ?? '全部'
+
+    return (
+      <section className="knowledge-page knowledge-page-question has-sticky-action">
+        <div className="knowledge-page-scroll">
+          <div className="knowledge-question-intro">
+            <CircleHelp size={24} />
+            <div>
+              <strong>用追问检查模型质量：看清前因后果，补齐关键因素，消除重复交叉，校准层级关系。</strong>
+              <p>通过系统思维、MECE 与金字塔原则，对当前节点进行结构化提问。</p>
+            </div>
+          </div>
+
+          <div className="knowledge-question-controls">
+            <div className="knowledge-question-categories" aria-label="追问模板分类">
+              {QUESTION_CATEGORIES.map((category) => (
+                <button
+                  key={category.id}
+                  type="button"
+                  className={questionFilter === category.id ? 'is-active' : ''}
+                  onClick={() => setQuestionFilter(category.id)}
+                >
+                  {category.label}
+                </button>
+              ))}
+            </div>
+            <div className="knowledge-question-view-controls">
+              <button type="button" onClick={() => setQuestionSort((current) => current === 'desc' ? 'asc' : 'desc')}>
+                按创建时间 {questionSort === 'desc' ? '↓' : '↑'}
+              </button>
+              <button type="button" className={questionView === 'list' ? 'is-active' : ''} title="列表视图" onClick={() => setQuestionView('list')}>
+                <List size={15} />
+              </button>
+              <button type="button" className={questionView === 'grid' ? 'is-active' : ''} title="卡片视图" onClick={() => setQuestionView('grid')}>
+                <Grid2X2 size={15} />
+              </button>
+            </div>
+          </div>
+
+          <div className="knowledge-question-list-head">
+            <strong>{questionFilter === 'all' ? '全部追问' : `${filterLabel}类追问`} · {filteredItems.length}</strong>
+            <button type="button" onClick={() => generateQuestionTemplates(questionFilter)}>
+              <Plus size={13} /> 生成{questionFilter === 'all' ? '默认' : filterLabel}模板
+            </button>
+          </div>
+
+          <div className={`knowledge-question-list is-${questionView}`}>
+            {filteredItems.map((item, index) => {
+              const isEditing = editingItemId === item.id
+              const itemType = getQuestionType(item)
+              const itemStatus = getQuestionStatus(item.status)
+              return (
+                <article key={item.id} className="knowledge-question-row">
+                  {isEditing ? renderItemEditor(item) : (
+                    <>
+                      <div className="knowledge-question-main">
+                        <div className="knowledge-question-title-row">
+                          <span className="knowledge-node-index">{String(index + 1).padStart(2, '0')}</span>
+                          <strong>{item.title}</strong>
+                          <span className={`knowledge-question-type is-${itemType}`}>{getQuestionCategoryLabel(itemType)}</span>
+                          <span className={`knowledge-question-status is-${itemStatus}`}>{getQuestionStatusLabel(item.status)}</span>
+                        </div>
+                        <p>{item.plainText || item.content || '继续拆解这个节点背后的原因、条件或反例。'}</p>
+                      </div>
+                      <div className="knowledge-question-actions">
+                        <button type="button" onClick={() => startEditItem(item)}>继续拆解</button>
+                        <button type="button" onClick={() => convertQuestionToAction(item)} disabled={itemStatus === 'converted_to_action'}>
+                          <ClipboardCheck size={13} /> {itemStatus === 'converted_to_action' ? '已转行动' : '转为行动'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => updateItemPatch(item.id, { status: itemStatus === 'resolved' ? 'to_think' : 'resolved' })}
+                        >
+                          <CheckCircle2 size={13} /> {itemStatus === 'resolved' ? '取消解决' : '标记已解决'}
+                        </button>
+                        <div className="knowledge-quote-row-actions">
+                          <button
+                            type="button"
+                            className="knowledge-quote-more"
+                            title="更多操作"
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              setQuoteActionMenuId((current) => current === item.id ? null : item.id)
+                            }}
+                          >
+                            <MoreHorizontal size={15} />
+                          </button>
+                          {quoteActionMenuId === item.id && (
+                            <div className="knowledge-quote-action-menu">
+                              <button type="button" onClick={() => startEditItem(item)}>编辑</button>
+                              <button type="button" className="is-danger" onClick={() => deleteItem(item.id)}><Trash2 size={13} /> 删除</button>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </article>
+              )
+            })}
+            {filteredItems.length === 0 && (
+              <div className="knowledge-question-empty">
+                <CircleHelp size={24} />
+                <strong>还没有{questionFilter === 'all' ? '' : filterLabel}类追问</strong>
+                <p>可以新建一个问题，或从模板快速生成。</p>
+                <button type="button" onClick={() => generateQuestionTemplates(questionFilter)}>生成追问模板</button>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="knowledge-sticky-add">
+          <button type="button" className="knowledge-workbench-add" onClick={startCreateItem}><Plus size={16} /> 新建追问</button>
+          <div className="knowledge-workbench-count">共 {activeItems.length} 个追问</div>
+        </div>
+      </section>
+    )
+  }
+
+  const renderActionPage = () => {
+    const doneCount = activeItems.filter((item) => item.status === 'done').length
+    const progress = activeItems.length === 0 ? 0 : Math.round(doneCount / activeItems.length * 100)
+    const actionIds = new Set(activeItems.map((item) => item.id))
+    const rootActions = activeItems.filter((item) => !item.parentActionId || !actionIds.has(item.parentActionId))
+    const orderedActions: Array<{ item: NodeKnowledgeItem; depth: number }> = []
+    const visited = new Set<string>()
+    const appendAction = (item: NodeKnowledgeItem, depth: number) => {
+      if (visited.has(item.id)) return
+      visited.add(item.id)
+      orderedActions.push({ item, depth })
+      activeItems
+        .filter((child) => child.parentActionId === item.id)
+        .sort((left, right) => (left.sortOrder ?? left.createdAt) - (right.sortOrder ?? right.createdAt))
+        .forEach((child) => appendAction(child, depth + 1))
+    }
+    rootActions
+      .sort((left, right) => (left.sortOrder ?? left.createdAt) - (right.sortOrder ?? right.createdAt))
+      .forEach((item) => appendAction(item, 0))
+    activeItems.filter((item) => !visited.has(item.id)).forEach((item) => appendAction(item, 0))
+
+    const contextAction = actionContextMenu
+      ? activeItems.find((item) => item.id === actionContextMenu.itemId)
+      : undefined
+    const priorityAction = actionPriorityMenu
+      ? activeItems.find((item) => item.id === actionPriorityMenu.itemId)
+      : undefined
+
+    return (
+      <section className="knowledge-page knowledge-page-action has-sticky-action">
+        <div className="knowledge-page-scroll">
+          <div className="knowledge-action-goal">
+            <div>
+              <strong><Target size={18} /> 行动目标</strong>
+              <p>将因果洞察转化为具体行动，打破模式，建立新的回应方式。</p>
+            </div>
+            <div className="knowledge-action-goal-progress">
+              <div className="knowledge-progress-ring" style={{ '--progress': `${progress}%` } as CSSProperties}>
+                <span>{progress}%</span>
+              </div>
+              <small>{doneCount} / {activeItems.length} 已完成</small>
+            </div>
+          </div>
+
+          <div className="knowledge-action-list-head">
+            <strong>下一步行动</strong>
+            <div>
+              <span>预计完成时间</span>
+              <span>优先级</span>
+            </div>
+          </div>
+
+          <div className="knowledge-action-list">
+            {orderedActions.map(({ item, depth }) => {
+              const isEditing = editingItemId === item.id
+              const itemProgress = Math.max(0, Math.min(100, item.progress ?? 0))
+              return (
+                <article
+                  key={item.id}
+                  className={`knowledge-action-row${depth > 0 ? ' is-child' : ''}${selectedActionId === item.id ? ' is-selected' : ''}`}
+                  style={{ '--action-depth': Math.min(depth, 4) } as CSSProperties}
+                  onClick={() => setSelectedActionId(item.id)}
+                  onDoubleClick={() => !isEditing && startEditItem(item)}
+                  onContextMenu={(event) => !isEditing && openActionContextMenu(event, item.id)}
+                >
+                  {isEditing ? renderItemEditor(item) : (
+                    <>
+                      <button
+                        type="button"
+                        className={`knowledge-check${item.status === 'done' ? ' is-checked' : ''}`}
+                        title={item.status === 'done' ? '标记为未完成' : '标记为已完成'}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          updateItemPatch(item.id, { status: item.status === 'done' ? 'todo' : 'done', progress: item.status === 'done' ? 0 : 100 })
+                        }}
+                      >
+                        {item.status === 'done' && <Check size={13} />}
+                      </button>
+                      <div className="knowledge-action-content">
+                        <strong>{item.title}</strong>
+                        <p>{item.plainText || item.content || '描述这一步行动。'}</p>
+                        <div className="knowledge-action-progress-line">
+                          <div className="knowledge-progress-bar"><span style={{ width: `${itemProgress}%` }} /></div>
+                          <small>{itemProgress}%</small>
+                        </div>
+                      </div>
+                      <div className="knowledge-action-due">
+                        <button
+                          type="button"
+                          title="选择预计完成时间"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            const input = event.currentTarget.nextElementSibling as HTMLInputElement | null
+                            if (typeof input?.showPicker === 'function') input.showPicker()
+                            else input?.click()
+                          }}
+                        >
+                          <Calendar size={14} />
+                          <span>{item.dueDate?.replaceAll('-', '/') ?? '未设置'}</span>
+                        </button>
+                        <input
+                          className="knowledge-action-date-picker"
+                          type="date"
+                          tabIndex={-1}
+                          value={item.dueDate ?? ''}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) => updateItemPatch(item.id, { dueDate: event.target.value })}
+                        />
+                        <small>（{getDueDateHint(item.dueDate)}）</small>
+                      </div>
+                      <button
+                        type="button"
+                        className={`knowledge-action-priority is-priority-${item.priority ?? 'medium'}`}
+                        title="选择优先级"
+                        onClick={(event) => openActionPriorityMenu(event, item.id)}
+                      >
+                        {item.priority === 'high' ? '高' : item.priority === 'low' ? '低' : '中'}
+                        <ChevronDown size={12} />
+                      </button>
+                    </>
+                  )}
+                </article>
+              )
+            })}
+            {activeItems.length === 0 && (
+              <div className="knowledge-action-empty">
+                <Target size={24} />
+                <strong>还没有下一步行动</strong>
+                <p>把洞察转化为一个可执行、可验证的小行动。</p>
+              </div>
+            )}
+          </div>
+          {actionContextMenu && contextAction && createPortal(
+            <div
+              className="knowledge-action-context-menu"
+              style={{ left: actionContextMenu.x, top: actionContextMenu.y }}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onContextMenu={(event) => {
+                event.preventDefault()
+                event.stopPropagation()
+              }}
+            >
+              <button type="button" onClick={() => startEditItem(contextAction)}><Pencil size={14} /> 编辑</button>
+              <button type="button" onClick={() => startCreateAction(contextAction.id)}><Plus size={14} /> 新建子行动</button>
+              <button type="button" className="is-danger" onClick={() => deleteItem(contextAction.id)}><Trash2 size={14} /> 删除</button>
+            </div>,
+            document.body,
+          )}
+          {actionPriorityMenu && priorityAction && createPortal(
+            <div
+              className="knowledge-action-priority-menu"
+              style={{ left: actionPriorityMenu.x, top: actionPriorityMenu.y }}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+            >
+              {(['high', 'medium', 'low'] as const).map((priority) => (
+                <button
+                  key={priority}
+                  type="button"
+                  className={`is-priority-${priority}${priorityAction.priority === priority ? ' is-active' : ''}`}
+                  onClick={() => {
+                    updateItemPatch(priorityAction.id, { priority })
+                    setActionPriorityMenu(null)
+                  }}
+                >
+                  <span />
+                  {priority === 'high' ? '高' : priority === 'medium' ? '中' : '低'}
+                  {priorityAction.priority === priority && <Check size={13} />}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
+        </div>
+        <div className="knowledge-sticky-add knowledge-action-sticky-add">
+          <button type="button" className="knowledge-workbench-add" onClick={() => startCreateAction()}><Plus size={16} /> 新建行动</button>
+          <div className="knowledge-workbench-count">共 {activeItems.length} 个行动</div>
+        </div>
       </section>
     )
   }
@@ -1861,7 +2651,13 @@ export function NodeKnowledgePanel({
       />
 
       {renderPanelToolbar()}
-      <main className="knowledge-workbench-content" onClick={() => setQuoteActionMenuId(null)}>
+      <main
+        className="knowledge-workbench-content"
+        onClick={() => {
+          setQuoteActionMenuId(null)
+          setChainContextMenu(null)
+        }}
+      >
         {renderActivePage()}
       </main>
       {renderTagContextMenu()}
