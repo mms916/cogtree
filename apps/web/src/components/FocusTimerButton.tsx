@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronDown, Clock, X } from 'lucide-react'
 
 const DEFAULT_MINUTES = 25
@@ -11,6 +11,7 @@ function formatSeconds(totalSeconds: number) {
 }
 
 export function FocusTimerButton() {
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const [durationMinutes, setDurationMinutes] = useState(DEFAULT_MINUTES)
   const [customMinutes, setCustomMinutes] = useState(String(DEFAULT_MINUTES))
@@ -39,6 +40,19 @@ export function FocusTimerButton() {
     return () => window.clearInterval(intervalId)
   }, [durationMinutes, running])
 
+  useEffect(() => {
+    if (!menuOpen) return
+
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target as Node | null
+      if (target && menuRef.current?.contains(target)) return
+      setMenuOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeMenu)
+    return () => document.removeEventListener('pointerdown', closeMenu)
+  }, [menuOpen])
+
   const startTimer = (minutes: number) => {
     const nextMinutes = Math.max(1, Math.min(240, Math.round(minutes)))
     setDurationMinutes(nextMinutes)
@@ -64,7 +78,7 @@ export function FocusTimerButton() {
   }
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div ref={menuRef} style={{ position: 'relative' }}>
       <button onClick={() => setMenuOpen((current) => !current)}>
         <Clock size={14} />
         {label}

@@ -24,7 +24,7 @@ import {
 import { CanvasExportMenu } from '../components/CanvasExportMenu'
 import { FocusTimerButton } from '../components/FocusTimerButton'
 import { fetchJson } from '../lib/api'
-import { downloadMarkdownFile, downloadTreeImage } from '../lib/treeExport'
+import { downloadMarkdownFile, downloadTreeImage, downloadTreeSvg } from '../lib/treeExport'
 import { CanvasWorkspace } from '../modules/canvas/CanvasWorkspace'
 import { NodeKnowledgePanel } from '../modules/canvas/NodeKnowledgePanel'
 import type { BaseNode } from '../stores/useDocumentStore'
@@ -176,6 +176,16 @@ export function ThemeTreePage() {
       await downloadTreeImage(nodes, rootNodeIds, exportTitle, resolution)
     } catch (error) {
       console.warn('Failed to export theme tree image.', error)
+    } finally {
+      setIsExportMenuOpen(false)
+    }
+  }
+
+  const handleExportSvg = () => {
+    try {
+      downloadTreeSvg(nodes, rootNodeIds, exportTitle)
+    } catch (error) {
+      console.warn('Failed to export theme tree SVG.', error)
     } finally {
       setIsExportMenuOpen(false)
     }
@@ -730,8 +740,10 @@ export function ThemeTreePage() {
             <CanvasExportMenu
               open={isExportMenuOpen}
               onExportImage={(resolution) => void handleExportImage(resolution)}
+              onExportSvg={handleExportSvg}
               onExportOutlineMarkdown={handleExportMarkdownOutline}
               onExportKnowledgeMarkdown={handleExportMarkdownKnowledge}
+              onRequestClose={() => setIsExportMenuOpen(false)}
             />
           </div>
           <FocusTimerButton />

@@ -45,11 +45,21 @@ export interface NodeKnowledgeTag {
   updatedAt: number
 }
 
+export interface KnowledgeTitleStyle {
+  fontSize?: number
+  color?: string
+  bold?: boolean
+  italic?: boolean
+  underline?: boolean
+  textAlign?: 'left' | 'center' | 'right'
+}
+
 export interface NodeKnowledgeItem {
   id: string
   tagId: string
   contentType: KnowledgeTagKind
   title: string
+  titleStyle?: KnowledgeTitleStyle
   content: string
   contentHtml?: string
   plainText?: string
@@ -445,6 +455,7 @@ interface DocumentState {
   redo: () => void
   clearHistory: () => void
   updateNodePosition: (id: string, position: { x: number; y: number }) => void
+  updateNodePositions: (positions: Record<string, { x: number; y: number }>) => void
   updateNodePositionWithChildren: (id: string, position: { x: number; y: number }) => void
   updateNodeLabel: (id: string, label: string) => void
   updateNodeType: (id: string, nodeType: BaseNode['nodeType']) => void
@@ -457,12 +468,16 @@ interface DocumentState {
       parentId?: string | null
       afterNodeId?: string | null
       position?: { x: number; y: number }
+      sourceNodes?: Record<string, BaseNode>
     }
   ) => string | null
   deleteNode: (nodeId: string) => void
   moveNodeAsChild: (nodeId: string, parentId: string) => boolean
   moveNodeAsSibling: (nodeId: string, targetNodeId: string) => boolean
   toggleNodeCollapsed: (nodeId: string) => void
+  expandAllNodes: () => void
+  collapseNodesDeeperThan: (maxVisibleDepth: number, fanoutLimit?: number) => void
+  relayoutTree: () => void
   updateNodeMeta: (id: string, meta: Record<string, unknown>) => void
   updateSubtreeEdgeColor: (nodeId: string, edgeColor: string) => void
   updateNodeNotes: (id: string, notes: NodeNote[]) => void
@@ -527,6 +542,19 @@ export const useDocumentStore = create<DocumentState>((set) => ({
         [id]: { ...state.nodes[id], position }
       }
     })),
+
+  updateNodePositions: (positions) =>
+    set((state) => {
+      const entries = Object.entries(positions)
+      if (entries.length === 0) return state
+      const nextNodes = { ...state.nodes }
+      entries.forEach(([id, position]) => {
+        const node = nextNodes[id]
+        if (!node) return
+        nextNodes[id] = { ...node, position }
+      })
+      return { nodes: nextNodes }
+    }),
 
   updateNodePositionWithChildren: (id: string, position: { x: number; y: number }) =>
     set((state) => {
@@ -850,7 +878,8 @@ export const useDocumentStore = create<DocumentState>((set) => ({
     let duplicatedRootId: string | null = null
 
     set((state) => {
-      const sourceNode = state.nodes[sourceNodeId]
+      const sourceNodes = options.sourceNodes ?? state.nodes
+      const sourceNode = sourceNodes[sourceNodeId]
       if (!sourceNode) return state
 
       const targetParentId = options.parentId === undefined ? sourceNode.parentId : options.parentId
@@ -874,7 +903,7 @@ export const useDocumentStore = create<DocumentState>((set) => ({
       }
 
       const cloneSubtree = (nodeId: string, parentId: string | null, isRootClone: boolean): string | null => {
-        const node = state.nodes[nodeId]
+        const node = sourceNodes[nodeId]
         if (!node) return null
 
         const newNodeId = generateNodeId()
@@ -1170,6 +1199,92 @@ export const useDocumentStore = create<DocumentState>((set) => ({
         ...pushUndoHistory(state),
         nodes: nextNodes,
         version: state.version + 1
+      }
+    })
+  },
+
+  expandAllNodes: () => {
+    set((state) => {
+      const collapsedNodeIds = Object.values(state.nodes)
+        .filter((node) => node.status === 'collapsed')
+        .map((node) => node.id)
+
+      if (collapsedNodeIds.length === 0) return state
+
+      const nextNodes = { ...state.nodes }
+      collapsedNodeIds.forEach((nodeId) => {
+        const node = nextNodes[nodeId]
+        if (!node) return
+        nextNodes[nodeId] = {
+          ...node,
+          status: 'normal'
+        }
+      })
+
+      state.rootNodeIds.forEach((rootNodeId) => {
+        layoutSubtree(nextNodes, rootNodeId)
+      })
+
+      return {
+        ...pushUndoHistory(state),
+        nodes: nextNodes,
+        version: state.version + 1
+      }
+    })
+  },
+
+  collapseNodesDeeperThan: (maxVisibleDepth, fanoutLimit = Number.POSITIVE_INFINITY) => {
+    set((state) => {
+      let changed = false
+      const nextNodes = { ...state.nodes }
+
+      Object.values(state.nodes).forEach((node) => {
+        if (node.childrenIds.length === 0) return
+        if (node.status === 'collapsed') return
+        const shouldCollapseByDepth = getNodeDepth(state.nodes, node.id) >= maxVisibleDepth
+        const shouldCollapseByFanout = node.childrenIds.length > fanoutLimit
+        if (!shouldCollapseByDepth && !shouldCollapseByFanout) return
+
+        nextNodes[node.id] = {
+          ...node,
+          status: 'collapsed'
+        }
+        changed = true
+      })
+
+      if (!changed) return state
+
+      state.rootNodeIds.forEach((rootNodeId) => {
+        layoutSubtree(nextNodes, rootNodeId)
+      })
+
+      return {
+        nodes: nextNodes,
+        rootNodeIds: state.rootNodeIds,
+        treeId: state.treeId,
+        version: state.version + 1,
+        undoStack: state.undoStack,
+        redoStack: state.redoStack
+      }
+    })
+  },
+
+  relayoutTree: () => {
+    set((state) => {
+      if (state.rootNodeIds.length === 0) return state
+
+      const nextNodes = { ...state.nodes }
+      state.rootNodeIds.forEach((rootNodeId) => {
+        layoutSubtree(nextNodes, rootNodeId)
+      })
+
+      return {
+        nodes: nextNodes,
+        rootNodeIds: state.rootNodeIds,
+        treeId: state.treeId,
+        version: state.version + 1,
+        undoStack: state.undoStack,
+        redoStack: state.redoStack
       }
     })
   }

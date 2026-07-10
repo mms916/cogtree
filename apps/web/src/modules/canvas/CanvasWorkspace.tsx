@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useEffect, useRef, useState } from 'react'
+import { startTransition, useMemo, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -7,7 +7,7 @@ import {
 } from '@xyflow/react'
 import type { Node, Edge, NodeChange, NodeTypes, ReactFlowInstance, NodePositionChange } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { CircleCheck, CircleDot, CircleHelp, ClipboardPaste, Copy, Edit3, GitBranchPlus, ImagePlus, ListPlus, Palette, PanelTopClose, PanelTopOpen, Star, StickyNote, Trash2 } from 'lucide-react'
+import { CircleCheck, CircleDot, CircleHelp, ClipboardPaste, Copy, Edit3, Eye, GitBranchPlus, ImagePlus, ListPlus, Palette, PanelTopClose, PanelTopOpen, Star, StickyNote, Trash2 } from 'lucide-react'
 
 import type { BaseNode, NodeImageAttachment } from '../../stores/useDocumentStore'
 import { useDocumentStore } from '../../stores/useDocumentStore'
@@ -42,6 +42,19 @@ const EDGE_COLOR_SWATCHES = [
   '#2dd4bf',
   '#f8fafc',
 ] as const
+
+const AUTO_FIT_VIEW_NODE_LIMIT = 180
+const LARGE_TREE_VISIBLE_NODE_LIMIT = 650
+const LARGE_TREE_COLLAPSE_DEPTH = 2
+const LARGE_TREE_FANOUT_COLLAPSE_LIMIT = 80
+const KEYBOARD_NAVIGATION_VISIBILITY_PADDING = 8
+
+type CanvasNodeClipboard = {
+  rootNodeId: string
+  nodes: Record<string, BaseNode>
+}
+
+let canvasNodeClipboard: CanvasNodeClipboard | null = null
 
 type CanvasNodeData = BaseNode & {
   depth: number
@@ -252,8 +265,125 @@ function getNodePresentation(
   }
 }
 
+type KeyboardNavigationDirection = 'up' | 'down' | 'left' | 'right'
+
+function getNodeCenter(
+  nodes: Record<string, BaseNode>,
+  nodeId: string
+) {
+  const node = nodes[nodeId]
+  if (!node) return null
+
+  const nodeSize = estimateNodeSize(nodes, node)
+  return {
+    x: node.position.x + nodeSize.width / 2,
+    y: node.position.y + nodeSize.height / 2,
+  }
+}
+
+function findNearestVisibleNodeInDirection(
+  nodes: Record<string, BaseNode>,
+  visibleNodeIds: string[],
+  selectedNodeId: string,
+  direction: KeyboardNavigationDirection
+) {
+  const currentCenter = getNodeCenter(nodes, selectedNodeId)
+  if (!currentCenter) return null
+
+  const scoredCandidates = visibleNodeIds
+    .filter((nodeId) => nodeId !== selectedNodeId)
+    .map((nodeId) => {
+      const candidateCenter = getNodeCenter(nodes, nodeId)
+      if (!candidateCenter) return null
+
+      const deltaX = candidateCenter.x - currentCenter.x
+      const deltaY = candidateCenter.y - currentCenter.y
+      const isCandidateInDirection =
+        direction === 'up'
+          ? deltaY < -4
+          : direction === 'down'
+            ? deltaY > 4
+            : direction === 'left'
+              ? deltaX < -4
+              : deltaX > 4
+
+      if (!isCandidateInDirection) return null
+
+      const primaryDistance = direction === 'up' || direction === 'down'
+        ? Math.abs(deltaY)
+        : Math.abs(deltaX)
+      const secondaryDistance = direction === 'up' || direction === 'down'
+        ? Math.abs(deltaX)
+        : Math.abs(deltaY)
+
+      return {
+        nodeId,
+        score: primaryDistance * 1.8 + secondaryDistance * 0.52,
+      }
+    })
+    .filter((candidate): candidate is { nodeId: string; score: number } => candidate !== null)
+    .sort((left, right) => left.score - right.score)
+
+  return scoredCandidates[0]?.nodeId ?? null
+}
+
+function findKeyboardNavigationTarget(
+  nodes: Record<string, BaseNode>,
+  visibleNodeIds: string[],
+  selectedNodeId: string | null,
+  direction: KeyboardNavigationDirection
+) {
+  if (visibleNodeIds.length === 0) return null
+  if (!selectedNodeId || !nodes[selectedNodeId] || !visibleNodeIds.includes(selectedNodeId)) {
+    return visibleNodeIds[0]
+  }
+
+  const selectedNode = nodes[selectedNodeId]
+
+  if (direction === 'left' && selectedNode.parentId && visibleNodeIds.includes(selectedNode.parentId)) {
+    return selectedNode.parentId
+  }
+
+  if (direction === 'right') {
+    const firstVisibleChildId = selectedNode.childrenIds.find((childId) => visibleNodeIds.includes(childId))
+    if (firstVisibleChildId) return firstVisibleChildId
+  }
+
+  return findNearestVisibleNodeInDirection(nodes, visibleNodeIds, selectedNodeId, direction)
+}
+
+function shouldCenterNodeForKeyboardNavigation(
+  instance: ReactFlowInstance,
+  containerElement: HTMLElement | null,
+  nodes: Record<string, BaseNode>,
+  nodeId: string
+) {
+  const node = nodes[nodeId]
+  if (!node || !containerElement) return false
+
+  const nodeSize = estimateNodeSize(nodes, node)
+  const containerRect = containerElement.getBoundingClientRect()
+  const topLeft = instance.flowToScreenPosition(node.position)
+  const bottomRight = instance.flowToScreenPosition({
+    x: node.position.x + nodeSize.width,
+    y: node.position.y + nodeSize.height,
+  })
+  const padding = KEYBOARD_NAVIGATION_VISIBILITY_PADDING
+
+  return (
+    topLeft.x < containerRect.left + padding ||
+    topLeft.y < containerRect.top + padding ||
+    bottomRight.x > containerRect.right - padding ||
+    bottomRight.y > containerRect.bottom - padding
+  )
+}
+
 interface CanvasWorkspaceProps {
   onNodeSelect?: (nodeId: string | null) => void
+  focusNodeRequest?: {
+    nodeId: string
+    requestId: number
+  } | null
   title?: string
   subtitle?: string
   nodes?: any[]
@@ -282,10 +412,11 @@ interface CanvasWorkspaceProps {
   }) => CanvasContextMenuItem[]
 }
 
-export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onCommand, getExtraContextMenuItems }: CanvasWorkspaceProps) {
+export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, onNodeInfoOpen, onCommand, getExtraContextMenuItems }: CanvasWorkspaceProps) {
   const {
     nodes: documentNodes,
     updateNodePosition,
+    updateNodePositions,
     updateNodePositionWithChildren,
     updateNodeLabel,
     createNode,
@@ -295,9 +426,13 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
     moveNodeAsChild,
     moveNodeAsSibling,
     toggleNodeCollapsed,
+    expandAllNodes,
     updateNodeMeta,
     updateSubtreeEdgeColor,
+    collapseNodesDeeperThan,
+    relayoutTree,
     rootNodeIds,
+    treeId,
   } = useDocumentStore()
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
@@ -308,10 +443,22 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   const [paneContextMenu, setPaneContextMenu] = useState<PaneContextMenuState | null>(null)
   const [edgeContextMenu, setEdgeContextMenu] = useState<EdgeContextMenuState | null>(null)
   const [recentEdgeColors, setRecentEdgeColors] = useState<string[]>([])
-  const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null)
+  const [copiedNodeId, setCopiedNodeId] = useState<string | null>(
+    () => canvasNodeClipboard?.rootNodeId ?? null
+  )
+  const [focusedRootNodeId, setFocusedRootNodeId] = useState<string | null>(null)
+  const [flowReadyVersion, setFlowReadyVersion] = useState(0)
   const dragStartDescendantPositionsRef = useRef<Record<string, { x: number; y: number }>>({})
+  const dragStartNodePositionRef = useRef<{ x: number; y: number } | null>(null)
+  const canvasRootRef = useRef<HTMLDivElement | null>(null)
   const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null)
   const imageFileInputRef = useRef<HTMLInputElement | null>(null)
+  const lastHandledFocusRequestRef = useRef<number | null>(null)
+  const focusCenterTimeoutRef = useRef<number | null>(null)
+  const protectedLargeTreeIdRef = useRef<string | null>(null)
+  const manuallyExpandedLargeTreeIdRef = useRef<string | null>(null)
+  const relayoutedCollapsedTreeIdRef = useRef<string | null>(null)
+  const pendingNewNodeSelectionRef = useRef<string | null>(null)
   const lastKnowledgeToggleRef = useRef<{ nodeId: string | null; timestamp: number }>({
     nodeId: null,
     timestamp: 0,
@@ -355,6 +502,57 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
     setEditingDraft('')
   }, [editingDraft, editingNodeId, onCommand, updateNodeLabel])
 
+  const centerNodeInViewport = useCallback((nodeId: string, options?: { duration?: number; zoom?: number }) => {
+    const node = documentNodes[nodeId]
+    const instance = reactFlowInstanceRef.current
+    if (!node || !instance) return false
+
+    const nodeSize = estimateNodeSize(documentNodes, node)
+    void instance.setCenter(
+      node.position.x + nodeSize.width / 2,
+      node.position.y + nodeSize.height / 2,
+      {
+        duration: options?.duration ?? 560,
+        zoom: options?.zoom ?? 1.28,
+      }
+    )
+    return true
+  }, [documentNodes])
+
+  useEffect(() => {
+    if (!focusNodeRequest) return
+    if (lastHandledFocusRequestRef.current === focusNodeRequest.requestId) return
+    if (!documentNodes[focusNodeRequest.nodeId]) return
+    if (!reactFlowInstanceRef.current) return
+
+    lastHandledFocusRequestRef.current = focusNodeRequest.requestId
+    setFocusedRootNodeId(null)
+    selectNode(focusNodeRequest.nodeId)
+
+    if (focusCenterTimeoutRef.current !== null) {
+      window.clearTimeout(focusCenterTimeoutRef.current)
+    }
+
+    const runCenter = () => {
+      focusCenterTimeoutRef.current = null
+      centerNodeInViewport(focusNodeRequest.nodeId, { duration: 560, zoom: 1.28 })
+    }
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        focusCenterTimeoutRef.current = window.setTimeout(runCenter, 40)
+      })
+    })
+  }, [centerNodeInViewport, documentNodes, flowReadyVersion, focusNodeRequest, selectNode])
+
+  useEffect(() => {
+    return () => {
+      if (focusCenterTimeoutRef.current !== null) {
+        window.clearTimeout(focusCenterTimeoutRef.current)
+      }
+    }
+  }, [])
+
   const handleAddChild = useCallback(
     (nodeId: string) => {
       const node = documentNodes[nodeId]
@@ -367,6 +565,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         targetType: 'book_node',
         payload: { parentId: nodeId, label: '\u65b0\u8282\u70b9', nodeType: 'concept' }
       })
+      pendingNewNodeSelectionRef.current = newNodeId
       setEditingNodeId(newNodeId)
       setEditingDraft('\u65b0\u8282\u70b9')
       selectNode(newNodeId)
@@ -428,6 +627,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         targetType: 'book_node',
         payload: { siblingOfNodeId: nodeId, label: '\u65b0\u8282\u70b9', nodeType: 'concept' }
       })
+      pendingNewNodeSelectionRef.current = newNodeId
       setEditingNodeId(newNodeId)
       setEditingDraft('\u65b0\u8282\u70b9')
       selectNode(newNodeId)
@@ -459,6 +659,22 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   const handleCopyNode = useCallback(
     (nodeId: string) => {
       if (!documentNodes[nodeId]) return
+      const subtreeNodes: Record<string, BaseNode> = {}
+      const pendingNodeIds = [nodeId]
+
+      while (pendingNodeIds.length > 0) {
+        const currentNodeId = pendingNodeIds.pop()
+        if (!currentNodeId || subtreeNodes[currentNodeId]) continue
+        const currentNode = documentNodes[currentNodeId]
+        if (!currentNode) continue
+        subtreeNodes[currentNodeId] = structuredClone(currentNode)
+        pendingNodeIds.push(...currentNode.childrenIds)
+      }
+
+      canvasNodeClipboard = {
+        rootNodeId: nodeId,
+        nodes: subtreeNodes,
+      }
       setCopiedNodeId(nodeId)
       setContextMenu(null)
     },
@@ -467,19 +683,23 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
 
   const handlePasteNode = useCallback(
     (targetNodeId: string | null = selectedNodeId) => {
-      if (!copiedNodeId || !documentNodes[copiedNodeId]) return
+      const clipboard = canvasNodeClipboard
+      if (!clipboard || clipboard.rootNodeId !== copiedNodeId) return
       const targetNode = targetNodeId ? documentNodes[targetNodeId] : null
-      const sourceNode = documentNodes[copiedNodeId]
-      const newNodeId = duplicateSubtree(copiedNodeId, targetNode
+      const sourceNode = clipboard.nodes[clipboard.rootNodeId]
+      if (!sourceNode) return
+      const newNodeId = duplicateSubtree(clipboard.rootNodeId, targetNode
         ? {
             parentId: targetNode.id,
+            sourceNodes: clipboard.nodes,
           }
         : {
             parentId: null,
             position: {
               x: sourceNode.position.x + 48,
               y: sourceNode.position.y + 48,
-            }
+            },
+            sourceNodes: clipboard.nodes,
           })
       if (!newNodeId) return
 
@@ -489,7 +709,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         targetType: 'book_node',
         payload: {
           parentId: targetNode?.id ?? null,
-          copiedFromNodeId: copiedNodeId,
+          copiedFromNodeId: clipboard.rootNodeId,
         }
       })
       selectNode(newNodeId)
@@ -512,10 +732,106 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
     [onCommand, toggleNodeCollapsed]
   )
 
+  const handleFocusSubtree = useCallback((nodeId: string) => {
+    if (!documentNodes[nodeId]) return
+    const subtreeNodeCount = collectVisibleNodeIds(documentNodes, [nodeId]).length
+    startTransition(() => {
+      setFocusedRootNodeId(nodeId)
+    })
+    selectNode(nodeId)
+    setContextMenu(null)
+    setPaneContextMenu(null)
+    setEdgeContextMenu(null)
+    if (subtreeNodeCount <= AUTO_FIT_VIEW_NODE_LIMIT) {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          reactFlowInstanceRef.current?.fitView({ padding: 0.24, duration: 180 })
+        })
+      })
+    }
+  }, [documentNodes, selectNode])
+
+  const handleShowAllNodes = useCallback(() => {
+    const allNodeCount = collectVisibleNodeIds(documentNodes, rootNodeIds).length
+    startTransition(() => {
+      setFocusedRootNodeId(null)
+    })
+    setContextMenu(null)
+    setPaneContextMenu(null)
+    setEdgeContextMenu(null)
+    if (allNodeCount <= AUTO_FIT_VIEW_NODE_LIMIT) {
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          reactFlowInstanceRef.current?.fitView({ padding: 0.2, duration: 180 })
+        })
+      })
+    }
+  }, [documentNodes, rootNodeIds])
+
+  const handleExpandAllNodes = useCallback(() => {
+    const currentTreeKey = treeId ?? `anonymous-${rootNodeIds.join('|')}`
+    const totalNodeCount = Object.keys(documentNodes).length
+    if (totalNodeCount > LARGE_TREE_VISIBLE_NODE_LIMIT) {
+      manuallyExpandedLargeTreeIdRef.current = currentTreeKey
+      protectedLargeTreeIdRef.current = currentTreeKey
+    }
+
+    startTransition(() => {
+      expandAllNodes()
+      setFocusedRootNodeId(null)
+    })
+    setContextMenu(null)
+    setPaneContextMenu(null)
+    setEdgeContextMenu(null)
+    if (totalNodeCount > AUTO_FIT_VIEW_NODE_LIMIT) return
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        reactFlowInstanceRef.current?.fitView({ padding: 0.2, duration: 180 })
+      })
+    })
+  }, [documentNodes, expandAllNodes, rootNodeIds, treeId])
+
   useEffect(() => {
     if (!editingNodeId || documentNodes[editingNodeId]) return
     cancelEditing()
   }, [cancelEditing, documentNodes, editingNodeId])
+
+  useEffect(() => {
+    if (!editingNodeId || pendingNewNodeSelectionRef.current !== editingNodeId) return
+
+    const selectNewNodeLabel = () => {
+      if (pendingNewNodeSelectionRef.current !== editingNodeId) return
+      const nodeElement = Array.from(document.querySelectorAll<HTMLElement>('.react-flow__node[data-id]'))
+        .find((element) => element.dataset.id === editingNodeId)
+      const editor = nodeElement?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        'input.tree-node-edit-input, textarea.tree-node-note-editor'
+      )
+      if (!editor) return
+      if (editor.value !== editingDraft) {
+        pendingNewNodeSelectionRef.current = null
+        return
+      }
+      editor.focus({ preventScroll: true })
+      editor.select()
+    }
+
+    const frameId = window.requestAnimationFrame(selectNewNodeLabel)
+    const timers = [60, 160, 280].map((delay) => window.setTimeout(() => {
+      selectNewNodeLabel()
+      if (delay === 280) pendingNewNodeSelectionRef.current = null
+    }, delay))
+
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [documentNodes, editingDraft, editingNodeId])
+
+  useEffect(() => {
+    if (!focusedRootNodeId || documentNodes[focusedRootNodeId]) return
+    setFocusedRootNodeId(null)
+  }, [documentNodes, focusedRootNodeId])
 
   useEffect(() => {
     try {
@@ -530,11 +846,113 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   }, [])
 
   const visibleNodeIds = useMemo(
-    () => collectVisibleNodeIds(documentNodes, rootNodeIds),
-    [documentNodes, rootNodeIds]
+    () => collectVisibleNodeIds(documentNodes, focusedRootNodeId ? [focusedRootNodeId] : rootNodeIds),
+    [documentNodes, focusedRootNodeId, rootNodeIds]
   )
 
   const visibleNodeIdSet = useMemo(() => new Set(visibleNodeIds), [visibleNodeIds])
+
+  const selectNodeByKeyboard = useCallback(
+    (direction: KeyboardNavigationDirection) => {
+      const nextNodeId = findKeyboardNavigationTarget(documentNodes, visibleNodeIds, selectedNodeId, direction)
+      if (!nextNodeId) return false
+
+      selectNode(nextNodeId)
+      setContextMenu(null)
+      setPaneContextMenu(null)
+      setEdgeContextMenu(null)
+
+      const instance = reactFlowInstanceRef.current
+      const nextNode = documentNodes[nextNodeId]
+      if (
+        instance &&
+        nextNode &&
+        shouldCenterNodeForKeyboardNavigation(instance, canvasRootRef.current, documentNodes, nextNodeId)
+      ) {
+        const nodeSize = estimateNodeSize(documentNodes, nextNode)
+        void instance.setCenter(
+          nextNode.position.x + nodeSize.width / 2,
+          nextNode.position.y + nodeSize.height / 2,
+          {
+            duration: 140,
+            zoom: instance.getZoom(),
+          }
+        )
+      }
+
+      return true
+    },
+    [documentNodes, selectNode, selectedNodeId, visibleNodeIds]
+  )
+
+  const nodePresentationById = useMemo(() => {
+    const cache = new Map<string, ReturnType<typeof getNodePresentation>>()
+
+    const resolvePresentation = (nodeId: string): ReturnType<typeof getNodePresentation> => {
+      const cached = cache.get(nodeId)
+      if (cached) return cached
+
+      const node = documentNodes[nodeId]
+      if (!node) {
+        return getNodePresentation(documentNodes, nodeId)
+      }
+
+      if (!node.parentId || !documentNodes[node.parentId]) {
+        const rootPresentation = {
+          depth: 0,
+          branchIndex: 0,
+          branchColor: BRANCH_STYLES[0].color,
+          branchIcon: BRANCH_STYLES[0].icon,
+          outlineNumber: '',
+        }
+        cache.set(nodeId, rootPresentation)
+        return rootPresentation
+      }
+
+      const parentPresentation = resolvePresentation(node.parentId)
+      const depth = parentPresentation.depth + 1
+      const branchIndex = depth === 1 ? Math.max(0, node.orderIndex) : parentPresentation.branchIndex
+      const branchStyle = BRANCH_STYLES[branchIndex % BRANCH_STYLES.length]
+      const sequence = Math.max(0, node.orderIndex) + 1
+      const outlineNumber = depth === 1
+        ? ''
+        : parentPresentation.depth === 1
+          ? `${parentPresentation.branchIndex + 1}.${sequence}`
+          : `${parentPresentation.outlineNumber}.${sequence}`
+      const presentation = {
+        depth,
+        branchIndex,
+        branchColor: branchStyle.color,
+        branchIcon: branchStyle.icon,
+        outlineNumber,
+      }
+      cache.set(nodeId, presentation)
+      return presentation
+    }
+
+    visibleNodeIds.forEach(resolvePresentation)
+    return cache
+  }, [documentNodes, visibleNodeIds])
+
+  useEffect(() => {
+    const currentTreeKey = treeId ?? `anonymous-${rootNodeIds.join('|')}`
+    if (!currentTreeKey || relayoutedCollapsedTreeIdRef.current === currentTreeKey) return
+    const hasCollapsedNodes = Object.values(documentNodes).some((node) => node.status === 'collapsed')
+    if (!hasCollapsedNodes) return
+
+    relayoutedCollapsedTreeIdRef.current = currentTreeKey
+    relayoutTree()
+  }, [documentNodes, relayoutTree, rootNodeIds, treeId])
+
+  useEffect(() => {
+    const currentTreeKey = treeId ?? `anonymous-${rootNodeIds.join('|')}`
+    if (!currentTreeKey || protectedLargeTreeIdRef.current === currentTreeKey) return
+    if (manuallyExpandedLargeTreeIdRef.current === currentTreeKey) return
+    if (visibleNodeIds.length <= LARGE_TREE_VISIBLE_NODE_LIMIT) return
+
+    protectedLargeTreeIdRef.current = currentTreeKey
+    collapseNodesDeeperThan(LARGE_TREE_COLLAPSE_DEPTH, LARGE_TREE_FANOUT_COLLAPSE_LIMIT)
+  }, [collapseNodesDeeperThan, rootNodeIds, treeId, visibleNodeIds.length])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -554,6 +972,22 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
       if (isModifierPressed && event.key.toLowerCase() === 'c' && selectedNodeId && !editingNodeId) {
         event.preventDefault()
         handleCopyNode(selectedNodeId)
+        return
+      }
+
+      const arrowDirectionByKey: Partial<Record<string, KeyboardNavigationDirection>> = {
+        ArrowUp: 'up',
+        ArrowDown: 'down',
+        ArrowLeft: 'left',
+        ArrowRight: 'right',
+      }
+      const arrowDirection = arrowDirectionByKey[event.key]
+      if (arrowDirection && !editingNodeId) {
+        const didSelectNode = selectNodeByKeyboard(arrowDirection)
+        if (didSelectNode) {
+          event.preventDefault()
+          event.stopPropagation()
+        }
         return
       }
 
@@ -585,7 +1019,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [cancelEditing, editingNodeId, handleAddChild, handleAddSibling, handleCopyNode, handleDeleteNode, selectedNodeId])
+  }, [cancelEditing, editingNodeId, handleAddChild, handleAddSibling, handleCopyNode, handleDeleteNode, selectNodeByKeyboard, selectedNodeId])
 
   const handleResizeNote = useCallback((nodeId: string, size: { width: number; height: number }, commit = false) => {
     const node = documentNodes[nodeId]
@@ -649,7 +1083,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   const flowNodes: Node[] = useMemo(() => {
     return visibleNodeIds.map((nodeId) => {
       const node = documentNodes[nodeId]
-      const presentation = getNodePresentation(documentNodes, node.id)
+      const presentation = nodePresentationById.get(node.id) ?? getNodePresentation(documentNodes, node.id)
       return ({
       id: node.id,
       type: 'themeNode',
@@ -707,6 +1141,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
     handleUpdateNoteMeta,
     handleToggleCollapsed,
     onNodeInfoOpen,
+    nodePresentationById,
     selectNode,
     visibleNodeIds,
     saveEditing,
@@ -716,7 +1151,16 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   // Derive React Flow edges from parentId (Tree First approach)
   const flowEdges: Edge[] = useMemo(() => {
     const edges: Edge[] = []
-    Object.values(documentNodes).forEach((node) => {
+    const visibleChildCountByParent = new Map<string, number>()
+    visibleNodeIds.forEach((nodeId) => {
+      const parentId = documentNodes[nodeId]?.parentId
+      if (!parentId || !visibleNodeIdSet.has(parentId)) return
+      visibleChildCountByParent.set(parentId, (visibleChildCountByParent.get(parentId) ?? 0) + 1)
+    })
+
+    visibleNodeIds.forEach((nodeId) => {
+      const node = documentNodes[nodeId]
+      if (!node) return
       if (node.parentId && visibleNodeIdSet.has(node.id) && visibleNodeIdSet.has(node.parentId)) {
         edges.push({
           id: `e-${node.parentId}-${node.id}`,
@@ -727,8 +1171,8 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
           data: {
             color: typeof node.meta?.edgeColor === 'string'
               ? node.meta.edgeColor
-              : getNodePresentation(documentNodes, node.id).branchColor,
-            siblingCount: documentNodes[node.parentId]?.childrenIds.filter((childId) => visibleNodeIdSet.has(childId)).length ?? 1,
+              : nodePresentationById.get(node.id)?.branchColor ?? getNodePresentation(documentNodes, node.id).branchColor,
+            siblingCount: visibleChildCountByParent.get(node.parentId) ?? 1,
           },
         })
       }
@@ -754,7 +1198,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
       })
     }
     return edges
-  }, [documentNodes, dragPreview, draggingNodeId, visibleNodeIdSet])
+  }, [documentNodes, dragPreview, draggingNodeId, nodePresentationById, visibleNodeIds, visibleNodeIdSet])
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {
@@ -979,7 +1423,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         return
       }
 
-      if (copiedNodeId && documentNodes[copiedNodeId]) {
+      if (copiedNodeId && canvasNodeClipboard?.rootNodeId === copiedNodeId) {
         event.preventDefault()
         handlePasteNode(selectedNodeId)
       }
@@ -987,7 +1431,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
 
     window.addEventListener('paste', handlePasteImage)
     return () => window.removeEventListener('paste', handlePasteImage)
-  }, [addImagesFromFiles, copiedNodeId, documentNodes, editingNodeId, handlePasteNode, selectedNodeId])
+  }, [addImagesFromFiles, copiedNodeId, editingNodeId, handlePasteNode, selectedNodeId])
 
   const resolveDragPreview = useCallback(
     (draggedNodeId: string, nodePosition: { x: number; y: number }, pointerPosition?: { x: number; y: number }) => {
@@ -1073,6 +1517,9 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   const onNodeDragStart = useCallback((_: React.MouseEvent, node: Node) => {
     setDraggingNodeId(node.id)
     setDragPreview(null)
+    dragStartNodePositionRef.current = documentNodes[node.id]
+      ? { ...documentNodes[node.id].position }
+      : { ...node.position }
     const descendantIds = collectDescendantIds(documentNodes, node.id)
     dragStartDescendantPositionsRef.current = Object.fromEntries(
       descendantIds
@@ -1111,9 +1558,24 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         y: event.clientY,
       })
       const preview = resolveDragPreview(draggedNode.id, node.position, pointerPosition) ?? dragPreview
+      const startPosition = dragStartNodePositionRef.current
+      const descendantStartPositions = dragStartDescendantPositionsRef.current
       dragStartDescendantPositionsRef.current = {}
+      dragStartNodePositionRef.current = null
       setDragPreview(null)
-      if (!preview || !preview.targetNodeId) return
+      if (!preview || !preview.targetNodeId) {
+        if (startPosition) {
+          const deltaX = node.position.x - startPosition.x
+          const deltaY = node.position.y - startPosition.y
+          updateNodePositions(Object.fromEntries(
+            Object.entries(descendantStartPositions).map(([id, position]) => [
+              id,
+              { x: position.x + deltaX, y: position.y + deltaY }
+            ])
+          ))
+        }
+        return
+      }
       if (preview.mode === 'invalid') return
 
       if (preview.mode === 'child') {
@@ -1141,7 +1603,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         selectNode(draggedNode.id)
       }
     },
-    [documentNodes, dragPreview, editingNodeId, moveNodeAsChild, moveNodeAsSibling, onCommand, resolveDragPreview, selectNode]
+    [documentNodes, dragPreview, editingNodeId, moveNodeAsChild, moveNodeAsSibling, onCommand, resolveDragPreview, selectNode, updateNodePositions]
   )
 
   const onPaneClick = useCallback(() => {
@@ -1231,6 +1693,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         targetType: 'book_node',
         payload: { parentId: null, label: '\u65b0\u8282\u70b9', nodeType: 'concept' }
       })
+      pendingNewNodeSelectionRef.current = newNodeId
       setEditingNodeId(newNodeId)
       setEditingDraft('\u65b0\u8282\u70b9')
       selectNode(newNodeId)
@@ -1257,6 +1720,26 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
           action: () => handleToggleImportant(contextMenu.nodeId),
           group: 'state'
         },
+        {
+          key: 'focus-subtree',
+          label: focusedRootNodeId === contextMenu.nodeId ? '\u663e\u793a\u5168\u90e8' : '\u4ec5\u663e\u793a\u6b64\u5206\u652f',
+          icon: Eye,
+          action: () => {
+            if (focusedRootNodeId === contextMenu.nodeId) {
+              handleShowAllNodes()
+              return
+            }
+            handleFocusSubtree(contextMenu.nodeId)
+          },
+          group: 'state',
+        },
+        {
+          key: 'show-all-expanded',
+          label: '\u663e\u793a\u5168\u90e8',
+          icon: PanelTopOpen,
+          action: handleExpandAllNodes,
+          group: 'state'
+        },
         ...(getExtraContextMenuItems?.({
           nodeId: contextMenu.nodeId,
           node: documentNodes[contextMenu.nodeId],
@@ -1275,12 +1758,13 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
   const contextMenuSections = [
     { key: 'edit', label: '\u7f16\u8f91', className: 'node-context-menu-section node-context-menu-edit-grid', items: contextMenuItems.filter((item) => item.group === 'edit') },
     { key: 'create', label: '\u65b0\u5efa', className: 'node-context-menu-section node-context-menu-grid', items: contextMenuItems.filter((item) => item.group === 'create') },
-    { key: 'state', label: '\u72b6\u6001', className: 'node-context-menu-section', items: contextMenuItems.filter((item) => item.group === 'state') },
+    { key: 'state', label: '\u72b6\u6001', className: 'node-context-menu-section node-context-menu-state-grid', items: contextMenuItems.filter((item) => item.group === 'state') },
     { key: 'danger', label: '', className: 'node-context-menu-section node-context-menu-danger', items: contextMenuItems.filter((item) => item.group === 'danger') },
   ].filter((section) => section.items.length > 0)
 
   return (
     <div
+      ref={canvasRootRef}
       style={{ width: '100%', height: '100%' }}
       onDoubleClick={onPaneDoubleClick}
       onPointerDownCapture={openKnowledgeFromInfoButton}
@@ -1309,6 +1793,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         edges={flowEdges}
         onInit={(instance) => {
           reactFlowInstanceRef.current = instance
+          setFlowReadyVersion((version) => version + 1)
           onFlowReady?.({
             screenToFlowPosition: instance.screenToFlowPosition.bind(instance),
             fitView: instance.fitView.bind(instance)
@@ -1332,6 +1817,7 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.1}
         maxZoom={2}
+        onlyRenderVisibleElements
         proOptions={{ hideAttribution: true }}
       >
         <Background 
@@ -1431,6 +1917,16 @@ export function CanvasWorkspace({ onNodeSelect, onFlowReady, onNodeInfoOpen, onC
               <StickyNote size={14} strokeWidth={1.8} />
               新建便签
             </button>
+            {focusedRootNodeId && (
+              <button
+                type="button"
+                className="canvas-context-menu-item"
+                onClick={handleShowAllNodes}
+              >
+                <Eye size={14} strokeWidth={1.8} />
+                显示全部
+              </button>
+            )}
             <button
               type="button"
               className="canvas-context-menu-item"

@@ -130,7 +130,12 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     set((state) => ({
       groups: response.data.groups,
       books: response.data.books,
-      quotes: response.data.quotes,
+      quotes: response.data.quotes.map((quote) => {
+        const existingQuote = state.quotes.find((item) => item.id === quote.id)
+        return existingQuote?.treeSnapshot && !quote.treeSnapshot
+          ? { ...quote, treeSnapshot: existingQuote.treeSnapshot }
+          : quote
+      }),
       selectedBookId: state.selectedBookId && response.data.books.some((book) => book.id === state.selectedBookId)
         ? state.selectedBookId
         : pickInitialBookId(response.data.books, response.data.quotes),

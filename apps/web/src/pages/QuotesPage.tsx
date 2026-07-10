@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import type { ReactFlowInstance } from '@xyflow/react'
 import {
   Check,
   ChevronUp,
   Download,
   LayoutTemplate,
+  LoaderCircle,
   Maximize,
   Minus,
   Network,
@@ -21,7 +24,8 @@ import {
 import { CanvasExportMenu } from '../components/CanvasExportMenu'
 import { FocusTimerButton } from '../components/FocusTimerButton'
 import { fetchJson } from '../lib/api'
-import { downloadMarkdownFile, downloadTreeImage } from '../lib/treeExport'
+import { importTreeFromMarkdown } from '../lib/treeImport'
+import { downloadMarkdownFile, downloadTreeImage, downloadTreeSvg } from '../lib/treeExport'
 import { CanvasWorkspace } from '../modules/canvas/CanvasWorkspace'
 import { NodeKnowledgePanel } from '../modules/canvas/NodeKnowledgePanel'
 import type { BaseNode } from '../stores/useDocumentStore'
@@ -55,6 +59,19 @@ type WorkbenchDragState = WorkbenchPosition & {
 type WorkbenchSize = {
   width: number
   height: number
+}
+
+type PendingMarkdownImport = {
+  fileName: string
+  tree: ReturnType<typeof importTreeFromMarkdown>
+  quoteText: string
+  keywords: string[]
+}
+
+type MarkdownImportProgress = {
+  percent: number
+  label: string
+  detail: string
 }
 
 type WorkbenchResizeState = WorkbenchPosition & WorkbenchSize & {
@@ -169,6 +186,8 @@ function createPanelKeywords(texts?: string[]): PanelKeyword[] {
 export function QuotesPage() {
   const [, setSelectedNodeId] = useState<string | null>(null)
   const [knowledgeNodeId, setKnowledgeNodeId] = useState<string | null>(null)
+  const [focusedKnowledgeItemId, setFocusedKnowledgeItemId] = useState<string | null>(null)
+  const [canvasFocusRequest, setCanvasFocusRequest] = useState<{ nodeId: string; requestId: number } | null>(null)
   const lastKnowledgeToggleRef = useRef<{ nodeId: string | null; timestamp: number }>({ nodeId: null, timestamp: 0 })
   const [selectedText, setSelectedText] = useState('')
   const [isSelecting, setIsSelecting] = useState(false)
@@ -181,24 +200,30 @@ export function QuotesPage() {
   const [workbenchSize, setWorkbenchSize] = useState<WorkbenchSize>({ width: 420, height: 430 })
   const [isWorkbenchDragging, setIsWorkbenchDragging] = useState(false)
   const [isWorkbenchResizing, setIsWorkbenchResizing] = useState(false)
-  const [saveState, setSaveState] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [saveState, setSaveState] = useState<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle')
+  const [saveErrorMessage, setSaveErrorMessage] = useState('')
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
+  const [pendingMarkdownImport, setPendingMarkdownImport] = useState<PendingMarkdownImport | null>(null)
+  const [markdownImportProgress, setMarkdownImportProgress] = useState<MarkdownImportProgress | null>(null)
 
   const quoteTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const markdownInputRef = useRef<HTMLInputElement | null>(null)
   const canvasContainerRef = useRef<HTMLDivElement | null>(null)
+  const flowFitViewRef = useRef<ReactFlowInstance['fitView'] | null>(null)
   const workbenchRef = useRef<HTMLDivElement | null>(null)
   const workbenchDragRef = useRef<WorkbenchDragState | null>(null)
   const workbenchResizeRef = useRef<WorkbenchResizeState | null>(null)
   const skipNextQuoteAutoLoadRef = useRef(false)
   const suspendDefaultQuoteLoadRef = useRef(false)
-  const lastAutoSavedSnapshotRef = useRef<string | null>(null)
   const quoteCommandSequenceRef = useRef(0)
   const lastKnowledgeNodeRef = useRef<BaseNode | null>(null)
   const lastLoadedQuoteIdRef = useRef<string | null>(null)
+  const loadingQuoteWorkspaceIdRef = useRef<string | null>(null)
 
   const {
     nodes,
     rootNodeIds,
+    treeId,
     undoStack,
     redoStack,
     setTree,
@@ -206,12 +231,13 @@ export function QuotesPage() {
     updateNodeLabel,
     updateNodeMeta,
     updateNodeNotes,
+    expandAllNodes,
     clearNodes,
     undo,
     redo
   } = useDocumentStore()
-  const { books, quotes, selectedBookId, selectedQuoteId, loadLibraryFromApi, saveQuoteWorkspace, upsertQuoteFromApi, selectQuote } = useLibraryStore()
-  const { openResourceDrawer, setResourceDrawerView } = useUIStore()
+  const { books, quotes, selectedBookId, selectedQuoteId, loadLibraryFromApi, loadQuoteWorkspace, saveQuoteWorkspace, upsertQuoteFromApi, selectQuote } = useLibraryStore()
+  const { clearSearchNavigation, openResourceDrawer, searchNavigationTarget, setResourceDrawerView } = useUIStore()
   const liveKnowledgeNode = knowledgeNodeId ? nodes[knowledgeNodeId] : null
   const knowledgeNode = knowledgeNodeId ? liveKnowledgeNode ?? lastKnowledgeNodeRef.current : null
   useEffect(() => {
@@ -254,43 +280,15 @@ export function QuotesPage() {
       .map((rootNodeId) => effectiveNodes[rootNodeId]?.label.trim())
       .find(Boolean) || text.slice(0, 16) || '未命名主题'
 
-    const nodeSnapshot = Object.fromEntries(
-      Object.entries(effectiveNodes).map(([nodeId, node]) => [
-        nodeId,
-        {
-          ...node,
-          childrenIds: [...node.childrenIds],
-          meta: node.meta ? { ...node.meta } : undefined
-        }
-      ])
-    )
-
     return {
       quoteId: quoteIdOverride ?? activeQuote?.id,
       bookId: currentBook.id,
       text,
-      nodes: nodeSnapshot,
+      nodes: effectiveNodes,
       rootNodeIds: [...effectiveRootNodeIds],
       treeTitle,
       workspaceKeywords
     }
-  }
-
-  const buildWorkspaceSnapshot = (
-    textValue: string,
-    quoteIdOverride?: string | null,
-    nodeMapOverride?: typeof nodes,
-    rootIdsOverride?: typeof rootNodeIds,
-    workspaceKeywordTextsOverride?: string[]
-  ) => {
-    const payload = buildWorkspacePayload(
-      textValue,
-      quoteIdOverride,
-      nodeMapOverride,
-      rootIdsOverride,
-      workspaceKeywordTextsOverride
-    )
-    return payload ? JSON.stringify(payload) : null
   }
 
   const runQuoteWorkspaceCommand = useCallback(async (
@@ -315,8 +313,8 @@ export function QuotesPage() {
     )
     if (!snapshotPayload) return
 
-    const snapshot = JSON.stringify(snapshotPayload)
-    lastAutoSavedSnapshotRef.current = snapshot
+    setSaveState('saving')
+    setSaveErrorMessage('')
     const commandSequence = ++quoteCommandSequenceRef.current
 
     try {
@@ -342,25 +340,18 @@ export function QuotesPage() {
       upsertQuoteFromApi(savedQuote)
       setActiveQuoteId(savedQuote.id)
       setPanelKeywords(createPanelKeywords(savedQuote.workspaceKeywords))
-      if (savedQuote.treeSnapshot) {
-        setTree(`quote-${savedQuote.id}`, savedQuote.treeSnapshot.nodes, savedQuote.treeSnapshot.rootNodeIds)
-      }
-      lastAutoSavedSnapshotRef.current = buildWorkspaceSnapshot(
-        savedQuote.text,
-        savedQuote.id,
-        savedQuote.treeSnapshot?.nodes ?? {},
-        savedQuote.treeSnapshot?.rootNodeIds ?? [],
-        savedQuote.workspaceKeywords ?? []
-      )
+      setSaveState('saved')
     } catch (error) {
       console.warn(`Failed to run quote workspace command: ${commandName}`, error)
+      if (commandSequence === quoteCommandSequenceRef.current) {
+        setSaveState('error')
+        setSaveErrorMessage(error instanceof Error ? error.message : '自动保存失败，请检查网络后重试。')
+      }
     }
   }, [
     activeQuoteId,
-    buildWorkspaceSnapshot,
     quoteText,
     selectedQuoteId,
-    setTree,
     upsertQuoteFromApi
   ])
 
@@ -402,9 +393,26 @@ export function QuotesPage() {
     setIsSelecting(false)
     setSelectionActionPosition(null)
     if (isSwitchingQuote) {
+      const shouldOpenQuoteWorkbench = searchNavigationTarget?.quoteId === selectedQuote.id && searchNavigationTarget.type === 'quote'
       setSelectedNodeId(null)
       setKnowledgeNodeId(null)
-      setIsQuoteWorkbenchOpen(false)
+      setIsQuoteWorkbenchOpen(shouldOpenQuoteWorkbench)
+    }
+
+    if (!selectedQuote.treeSnapshot && (selectedQuote.nodeCount || selectedQuote.status === 'extracted')) {
+      if (loadingQuoteWorkspaceIdRef.current !== selectedQuote.id) {
+        loadingQuoteWorkspaceIdRef.current = selectedQuote.id
+        loadQuoteWorkspace(selectedQuote.id)
+          .catch((error) => {
+            console.warn('Failed to load selected quote workspace.', error)
+          })
+          .finally(() => {
+            if (loadingQuoteWorkspaceIdRef.current === selectedQuote.id) {
+              loadingQuoteWorkspaceIdRef.current = null
+            }
+          })
+      }
+      return
     }
 
     if (selectedQuote.treeSnapshot) {
@@ -413,20 +421,77 @@ export function QuotesPage() {
       clearNodes()
     }
 
-    lastAutoSavedSnapshotRef.current = buildWorkspaceSnapshot(
-      selectedQuote.text,
-      selectedQuote.id,
-      selectedQuote.treeSnapshot?.nodes ?? {},
-      selectedQuote.treeSnapshot?.rootNodeIds ?? [],
-      selectedQuote.workspaceKeywords ?? []
-    )
-  }, [clearNodes, quotes, selectedQuoteId, setTree])
+  }, [clearNodes, loadQuoteWorkspace, quotes, searchNavigationTarget, selectedQuoteId, setTree])
+
+  useEffect(() => {
+    const target = searchNavigationTarget
+    if (!target) return
+    if (target.quoteId !== selectedQuoteId && target.quoteId !== activeQuoteId) return
+
+    setResourceDrawerView('quotes')
+    openResourceDrawer()
+
+    if (target.type === 'quote') {
+      setKnowledgeNodeId(null)
+      setFocusedKnowledgeItemId(null)
+      setIsQuoteWorkbenchOpen(true)
+      window.requestAnimationFrame(() => {
+        void flowFitViewRef.current?.({ padding: 0.22, duration: 420 })
+      })
+      clearSearchNavigation(target.requestId)
+      return
+    }
+
+    if (!target.nodeId || treeId !== `quote-${target.quoteId}` || !nodes[target.nodeId]) return
+
+    expandAllNodes()
+    setSelectedNodeId(target.nodeId)
+    setCanvasFocusRequest({ nodeId: target.nodeId, requestId: target.requestId + 1 })
+
+    if (target.type === 'knowledge') {
+      setKnowledgeNodeId(target.nodeId)
+      setFocusedKnowledgeItemId(target.knowledgeItemId ?? null)
+      setIsQuoteWorkbenchOpen(false)
+    } else {
+      setKnowledgeNodeId(null)
+      setFocusedKnowledgeItemId(null)
+      setIsQuoteWorkbenchOpen(false)
+    }
+
+    clearSearchNavigation(target.requestId)
+  }, [
+    activeQuoteId,
+    clearSearchNavigation,
+    expandAllNodes,
+    nodes,
+    openResourceDrawer,
+    searchNavigationTarget,
+    selectedQuoteId,
+    setResourceDrawerView,
+    treeId,
+  ])
 
   useEffect(() => {
     if (selectedQuoteId) return
     if (activeQuote) {
       setQuoteText(activeQuote.text)
       setPanelKeywords(createPanelKeywords(activeQuote.workspaceKeywords))
+      if (!activeQuote.treeSnapshot && (activeQuote.nodeCount || activeQuote.status === 'extracted')) {
+        if (loadingQuoteWorkspaceIdRef.current !== activeQuote.id) {
+          loadingQuoteWorkspaceIdRef.current = activeQuote.id
+          loadQuoteWorkspace(activeQuote.id)
+            .catch((error) => {
+              console.warn('Failed to load active quote workspace.', error)
+            })
+            .finally(() => {
+              if (loadingQuoteWorkspaceIdRef.current === activeQuote.id) {
+                loadingQuoteWorkspaceIdRef.current = null
+              }
+            })
+        }
+        return
+      }
+
       if (activeQuote.treeSnapshot) {
         setTree(`quote-${activeQuote.id}`, activeQuote.treeSnapshot.nodes, activeQuote.treeSnapshot.rootNodeIds)
       } else {
@@ -438,31 +503,39 @@ export function QuotesPage() {
       clearNodes()
     }
 
-    lastAutoSavedSnapshotRef.current = activeQuote
-      ? buildWorkspaceSnapshot(
-          activeQuote.text,
-          activeQuote.id,
-          activeQuote.treeSnapshot?.nodes ?? {},
-          activeQuote.treeSnapshot?.rootNodeIds ?? [],
-          activeQuote.workspaceKeywords ?? []
-        )
-      : null
   }, [
     activeQuote?.id,
+    activeQuote?.nodeCount,
     activeQuote?.text,
     activeQuote?.treeSnapshot,
+    activeQuote?.status,
     activeQuote?.workspaceKeywords,
     clearNodes,
+    loadQuoteWorkspace,
     selectedQuoteId,
     setTree
   ])
 
   useEffect(() => {
-    if (saveState === 'idle') return
+    if (saveState !== 'dirty') return
 
-    const timeoutId = window.setTimeout(() => setSaveState('idle'), 1800)
+    const timeoutId = window.setTimeout(async () => {
+      const payload = buildWorkspacePayload(quoteText)
+      if (!payload) return
+      setSaveState('saving')
+      setSaveErrorMessage('')
+      try {
+        const savedQuoteId = await saveQuoteWorkspace(payload)
+        setActiveQuoteId(savedQuoteId)
+        setSaveState('saved')
+      } catch (error) {
+        setSaveState('error')
+        setSaveErrorMessage(error instanceof Error ? error.message : '自动保存失败，请检查网络后重试。')
+      }
+    }, 1200)
+
     return () => window.clearTimeout(timeoutId)
-  }, [saveState])
+  }, [quoteText, saveQuoteWorkspace, saveState])
 
   useEffect(() => {
     // 自动保存已禁用，用户需手动点击保存按钮
@@ -586,7 +659,6 @@ export function QuotesPage() {
     )
 
     if (payload) {
-      lastAutoSavedSnapshotRef.current = JSON.stringify(payload)
     }
 
     if (activeQuoteId || selectedQuoteId) {
@@ -615,10 +687,11 @@ export function QuotesPage() {
     if (!payload || (!payload.text && Object.keys(payload.nodes).length === 0)) return
 
     try {
+      setSaveState('saving')
+      setSaveErrorMessage('')
       skipNextQuoteAutoLoadRef.current = true
       suspendDefaultQuoteLoadRef.current = true
       const savedQuoteId = await saveQuoteWorkspace(payload)
-      lastAutoSavedSnapshotRef.current = JSON.stringify(payload)
       setSaveState('saved')
       setActiveQuoteId(savedQuoteId)
       setResourceDrawerView('quotes')
@@ -635,10 +708,25 @@ export function QuotesPage() {
       setSelectionActionPosition(null)
       setSelectedNodeId(null)
       setKnowledgeNodeId(null)
-      lastAutoSavedSnapshotRef.current = buildWorkspaceSnapshot('', null, {}, [])
     } catch (error) {
       console.warn('Failed to save quote workspace.', error)
       setSaveState('error')
+      setSaveErrorMessage(error instanceof Error ? error.message : '保存失败，请检查网络后重试。')
+    }
+  }
+
+  const retrySaveWorkspace = async () => {
+    const payload = buildWorkspacePayload(quoteText)
+    if (!payload) return
+    setSaveState('saving')
+    setSaveErrorMessage('')
+    try {
+      const savedQuoteId = await saveQuoteWorkspace(payload)
+      setActiveQuoteId(savedQuoteId)
+      setSaveState('saved')
+    } catch (error) {
+      setSaveState('error')
+      setSaveErrorMessage(error instanceof Error ? error.message : '保存失败，请检查网络后重试。')
     }
   }
 
@@ -663,6 +751,149 @@ export function QuotesPage() {
       console.warn('Failed to export tree image.', error)
     } finally {
       setIsExportMenuOpen(false)
+    }
+  }
+
+  const handleExportSvg = () => {
+    try {
+      downloadTreeSvg(nodes, rootNodeIds, exportTitle)
+    } catch (error) {
+      console.warn('Failed to export tree SVG.', error)
+    } finally {
+      setIsExportMenuOpen(false)
+    }
+  }
+
+  const handleImportMarkdownClick = () => {
+    setIsExportMenuOpen(false)
+    markdownInputRef.current?.click()
+  }
+
+  const handleImportMarkdownFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || !currentBook) return
+
+    try {
+      setMarkdownImportProgress(null)
+      const markdown = await file.text()
+      const importedTree = importTreeFromMarkdown(markdown, file.name.replace(/\.md$/i, ''))
+      console.info('Imported markdown tree', {
+        fileName: file.name,
+        nodeCount: Object.keys(importedTree.nodes).length,
+        rootNodeCount: importedTree.rootNodeIds.length,
+        quoteCount: importedTree.summary.quoteCount,
+        rootLabels: importedTree.rootNodeIds.slice(0, 5).map((rootNodeId) => importedTree.nodes[rootNodeId]?.label)
+      })
+      const importedQuoteText = importedTree.linkedQuoteText || importedTree.title
+      const importedKeywords = importedTree.rootNodeIds
+        .map((rootNodeId) => importedTree.nodes[rootNodeId]?.label)
+        .filter((label): label is string => Boolean(label?.trim()))
+
+      setPendingMarkdownImport({
+        fileName: file.name,
+        tree: importedTree,
+        quoteText: importedQuoteText,
+        keywords: importedKeywords,
+      })
+    } catch (error) {
+      console.warn('Failed to parse markdown tree.', error)
+      setSaveState('error')
+    }
+  }
+
+  const waitForImportPaint = () => new Promise<void>((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, 0)
+    })
+  })
+
+  const updateMarkdownImportProgress = async (progress: MarkdownImportProgress) => {
+    setMarkdownImportProgress(progress)
+    await waitForImportPaint()
+  }
+
+  const confirmImportMarkdown = async () => {
+    if (!pendingMarkdownImport || !currentBook || (markdownImportProgress && markdownImportProgress.label !== '导入失败')) return
+
+    try {
+      const { tree: importedTree, quoteText: importedQuoteText, keywords: importedKeywords } = pendingMarkdownImport
+      const nodeCount = importedTree.summary.nodeCount
+      const quoteCount = importedTree.summary.quoteCount
+
+      await updateMarkdownImportProgress({
+        percent: 8,
+        label: '准备导入',
+        detail: `准备写入 ${nodeCount} 个节点、${quoteCount} 条金句`
+      })
+
+      skipNextQuoteAutoLoadRef.current = true
+      suspendDefaultQuoteLoadRef.current = true
+
+      await updateMarkdownImportProgress({
+        percent: 28,
+        label: '写入画布',
+        detail: '正在创建节点和父子关系'
+      })
+      setTree(`quote-import-${Date.now()}`, importedTree.nodes, importedTree.rootNodeIds)
+
+      await updateMarkdownImportProgress({
+        percent: 52,
+        label: '整理视图',
+        detail: '正在调整画布视图和知识面板状态'
+      })
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          flowFitViewRef.current?.({ padding: 0.24, duration: 320 })
+        })
+      })
+      setQuoteText(importedQuoteText)
+      setPanelKeywords(createPanelKeywords(importedKeywords))
+      setSelectedNodeId(null)
+      setKnowledgeNodeId(null)
+      setIsQuoteWorkbenchOpen(false)
+
+      await updateMarkdownImportProgress({
+        percent: 68,
+        label: '生成保存内容',
+        detail: '正在打包画布、金句和节点知识'
+      })
+
+      const payload = buildWorkspacePayload(
+        importedQuoteText,
+        null,
+        importedTree.nodes,
+        importedTree.rootNodeIds,
+        importedKeywords
+      )
+      if (!payload) throw new Error('Failed to build markdown import payload.')
+
+      await updateMarkdownImportProgress({
+        percent: 82,
+        label: '保存导入结果',
+        detail: '正在写入书籍金句工作区'
+      })
+      const savedQuoteId = await saveQuoteWorkspace(payload)
+
+      await updateMarkdownImportProgress({
+        percent: 96,
+        label: '打开导入结果',
+        detail: '正在进入新导入的画布'
+      })
+      setActiveQuoteId(savedQuoteId)
+      setSaveState('saved')
+      setResourceDrawerView('quotes')
+      openResourceDrawer()
+      setPendingMarkdownImport(null)
+      setMarkdownImportProgress(null)
+    } catch (error) {
+      console.warn('Failed to import markdown tree.', error)
+      setSaveState('error')
+      setMarkdownImportProgress({
+        percent: 100,
+        label: '导入失败',
+        detail: '导入过程中出现问题，请稍后重试'
+      })
     }
   }
 
@@ -816,8 +1047,17 @@ export function QuotesPage() {
     { label: '备注', value: quoteCardSummary?.notes.length ?? 0 }
   ]
 
+  const isMarkdownImporting = Boolean(markdownImportProgress && markdownImportProgress.label !== '导入失败')
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', flex: 1, minHeight: 0 }}>
+      <input
+        ref={markdownInputRef}
+        type="file"
+        accept=".md,.markdown,text/markdown,text/plain"
+        className="visually-hidden"
+        onChange={handleImportMarkdownFile}
+      />
       <header className="top-bar" style={{ flexShrink: 0 }}>
         <div className="breadcrumbs">
           <span>书籍</span>
@@ -827,9 +1067,26 @@ export function QuotesPage() {
           <span className="current">金句提炼</span>
         </div>
         <div className="top-bar-actions" style={{ marginLeft: 'auto' }}>
-          <button className="primary" onClick={handleSaveWorkspace}>
-            {saveState === 'saved' ? <Check size={14} /> : <Save size={14} />}
-            {saveState === 'saved' ? '已保存' : saveState === 'error' ? '保存失败' : '保存'}
+          <button
+            className={`primary workspace-save-button is-${saveState}`}
+            disabled={saveState === 'saving'}
+            title={saveState === 'error' ? saveErrorMessage : undefined}
+            onClick={() => void (saveState === 'error' ? retrySaveWorkspace() : handleSaveWorkspace())}
+          >
+            {saveState === 'saving'
+              ? <LoaderCircle className="is-spinning" size={14} />
+              : saveState === 'saved'
+                ? <Check size={14} />
+                : <Save size={14} />}
+            {saveState === 'saving'
+              ? '保存中'
+              : saveState === 'saved'
+                ? '已保存'
+                : saveState === 'dirty'
+                  ? '未保存'
+                  : saveState === 'error'
+                    ? '重试保存'
+                    : '保存'}
           </button>
           <button className="icon-btn" title="撤销" onClick={undo} disabled={undoStack.length === 0}><Undo2 size={16} /></button>
           <button className="icon-btn" title="重做" onClick={redo} disabled={redoStack.length === 0}><Redo2 size={16} /></button>
@@ -839,13 +1096,22 @@ export function QuotesPage() {
             <CanvasExportMenu
               open={isExportMenuOpen}
               onExportImage={(resolution) => void handleExportImage(resolution)}
+              onExportSvg={handleExportSvg}
               onExportOutlineMarkdown={handleExportMarkdownOutline}
               onExportKnowledgeMarkdown={handleExportMarkdownKnowledge}
+              onImportMarkdown={handleImportMarkdownClick}
+              onRequestClose={() => setIsExportMenuOpen(false)}
             />
           </div>
           <FocusTimerButton />
         </div>
       </header>
+      {saveState === 'error' && (
+        <div className="workspace-save-error" role="alert">
+          <span>{saveErrorMessage || '自动保存失败，当前修改仍保留在本地页面中。'}</span>
+          <button type="button" onClick={() => void retrySaveWorkspace()}>立即重试</button>
+        </div>
+      )}
 
       <div style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative', overflow: 'hidden' }}>
         <div className="workspace-area" style={{ flex: 1, minWidth: 0, borderTop: 'none' }}>
@@ -952,7 +1218,11 @@ export function QuotesPage() {
                             <textarea
                               ref={quoteTextareaRef}
                               value={quoteText}
-                              onChange={(event) => setQuoteText(event.target.value)}
+                              onChange={(event) => {
+                                setQuoteText(event.target.value)
+                                setSaveState('dirty')
+                                setSaveErrorMessage('')
+                              }}
                               onSelect={handleSelect}
                               onMouseUp={handleSelect}
                               onKeyUp={handleSelect}
@@ -1315,7 +1585,11 @@ export function QuotesPage() {
               <NodeKnowledgePanel
                 selectedNode={knowledgeNode}
                 linkedQuotes={linkedQuoteText ? [{ id: activeQuote?.id ?? 'current-quote', text: linkedQuoteText }] : []}
-                onClose={() => setKnowledgeNodeId(null)}
+                focusItemId={focusedKnowledgeItemId}
+                onClose={() => {
+                  setKnowledgeNodeId(null)
+                  setFocusedKnowledgeItemId(null)
+                }}
                 onUpdateLabel={(label) => {
                   updateNodeLabel(knowledgeNode.id, label)
                   if (activeQuoteId || selectedQuoteId) {
@@ -1358,9 +1632,16 @@ export function QuotesPage() {
 
             <CanvasWorkspace
               onNodeSelect={setSelectedNodeId}
+              focusNodeRequest={canvasFocusRequest}
+              onFlowReady={({ fitView }) => {
+                flowFitViewRef.current = fitView
+              }}
               onNodeInfoOpen={handleNodeInfoOpen}
               onCommand={(command) => {
-                if (!(activeQuoteId || selectedQuoteId)) return
+                if (!(activeQuoteId || selectedQuoteId)) {
+                  setSaveState('dirty')
+                  return
+                }
                 void runQuoteWorkspaceCommand(command.commandName, command.payload ?? {}, {
                   targetId: command.targetId ?? null,
                   targetType: command.targetType === 'book_node' ? 'quote_node' : 'quote_workspace'
@@ -1370,6 +1651,87 @@ export function QuotesPage() {
           </div>
         </div>
       </div>
+      {pendingMarkdownImport && (
+        <div
+          className="markdown-import-dialog-backdrop"
+          role="presentation"
+          onMouseDown={() => {
+            if (!isMarkdownImporting) {
+              setMarkdownImportProgress(null)
+              setPendingMarkdownImport(null)
+            }
+          }}
+        >
+          <section className="markdown-import-dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="markdown-import-dialog-head">
+              <div>
+                <strong>导入 MD 预检</strong>
+                <p>{pendingMarkdownImport.fileName}</p>
+              </div>
+              <button
+                type="button"
+                disabled={isMarkdownImporting}
+                onClick={() => {
+                  setMarkdownImportProgress(null)
+                  setPendingMarkdownImport(null)
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="markdown-import-stats">
+              <div><span>节点</span><strong>{pendingMarkdownImport.tree.summary.nodeCount}</strong></div>
+              <div><span>根节点</span><strong>{pendingMarkdownImport.tree.summary.rootNodeCount}</strong></div>
+              <div><span>金句</span><strong>{pendingMarkdownImport.tree.summary.quoteCount}</strong></div>
+              <div><span>最大层级</span><strong>{pendingMarkdownImport.tree.summary.maxDepth}</strong></div>
+            </div>
+            <div className="markdown-import-preview">
+              <span>画布标题</span>
+              <strong>{pendingMarkdownImport.tree.title}</strong>
+              <p>{pendingMarkdownImport.keywords.slice(0, 8).join('、') || '未识别到根节点关键词'}</p>
+            </div>
+            {pendingMarkdownImport.tree.summary.warnings.length > 0 && (
+              <div className="markdown-import-warnings">
+                {pendingMarkdownImport.tree.summary.warnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
+            )}
+            {markdownImportProgress && (
+              <div className="markdown-import-progress" aria-live="polite">
+                <div className="markdown-import-progress-head">
+                  <strong>{markdownImportProgress.label}</strong>
+                  <span>{markdownImportProgress.percent}%</span>
+                </div>
+                <div className="markdown-import-progress-track">
+                  <div style={{ width: `${markdownImportProgress.percent}%` }} />
+                </div>
+                <p>{markdownImportProgress.detail}</p>
+              </div>
+            )}
+            <div className="markdown-import-dialog-actions">
+              <button
+                type="button"
+                disabled={isMarkdownImporting}
+                onClick={() => {
+                  setMarkdownImportProgress(null)
+                  setPendingMarkdownImport(null)
+                }}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="is-primary"
+                disabled={isMarkdownImporting}
+                onClick={() => void confirmImportMarkdown()}
+              >
+                {isMarkdownImporting ? '导入中...' : '确认导入'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   )
 }

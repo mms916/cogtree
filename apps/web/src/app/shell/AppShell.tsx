@@ -33,7 +33,7 @@ const navItems = [
 const toolItems = [
   { to: '/app/tools', label: '工具', icon: Wrench },
   { to: '/app/search', label: '搜索', icon: Search },
-  { to: '/app/settings', label: '设置', icon: Settings, isAccountMenuTrigger: true },
+  { to: '/app/settings', label: '设置', icon: Settings },
 ]
 
 const DEFAULT_AVATAR_URL = 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Crect width=%2264%22 height=%2264%22 rx=%2232%22 fill=%22%23f6d8c9%22/%3E%3Ccircle cx=%2232%22 cy=%2228%22 r=%2212%22 fill=%22%23f8efe8%22/%3E%3Cpath d=%22M18 59c2-12 8-19 14-19s12 7 14 19%22 fill=%22%232b7a78%22/%3E%3Cpath d=%22M20 25c1-10 7-16 15-14 7 2 10 8 9 16-6-5-14-6-24-2z%22 fill=%22%23524742%22/%3E%3Ccircle cx=%2227%22 cy=%2229%22 r=%222%22 fill=%22%2334231f%22/%3E%3Ccircle cx=%2238%22 cy=%2229%22 r=%222%22 fill=%22%2334231f%22/%3E%3Cpath d=%22M27 36c3 3 8 3 11 0%22 fill=%22none%22 stroke=%22%23b56b5d%22 stroke-width=%222%22 stroke-linecap=%22round%22/%3E%3C/svg%3E'
@@ -146,15 +146,6 @@ export function AppShell() {
     navigate('/login', { replace: true })
   }
 
-  const handleToolClick = (e: React.MouseEvent, item: any) => {
-    if (item.isAccountMenuTrigger) {
-      e.preventDefault()
-      closeResourceDrawer()
-      closeThemeDrawer()
-      setIsAccountMenuOpen((current) => !current)
-    }
-  }
-
   if (!initialized || !user) {
     return (
       <div className="app-shell-loading">
@@ -221,8 +212,11 @@ export function AppShell() {
               className={({ isActive }) => (isActive ? 'nav-item active' : 'nav-item')}
               key={item.to}
               to={item.to}
-              onClick={(e) => handleToolClick(e, item)}
-              data-account-trigger={item.isAccountMenuTrigger}
+              onClick={() => {
+                closeResourceDrawer()
+                closeThemeDrawer()
+                setIsAccountMenuOpen(false)
+              }}
             >
               <item.icon size={20} />
               {item.label}
@@ -236,12 +230,19 @@ export function AppShell() {
             <ChevronLeft size={14} />
           </button>
           <div className="sidebar-account" ref={accountRef}>
-            <div className="sidebar-account-card" title={user.displayName}>
+            <button
+              type="button"
+              className="sidebar-account-card"
+              title={user.displayName}
+              data-account-trigger="true"
+              aria-expanded={isAccountMenuOpen}
+              onClick={() => setIsAccountMenuOpen((current) => !current)}
+            >
               <img className="sidebar-profile-photo" src={DEFAULT_AVATAR_URL} alt="" />
               <span className="sidebar-profile-meta">
                 <span className="sidebar-profile-name">{user.displayName}</span>
               </span>
-            </div>
+            </button>
             {isAccountMenuOpen && (
               <div className="sidebar-account-menu">
                 <div className="sidebar-account-info">
@@ -251,7 +252,14 @@ export function AppShell() {
                     <div className="sidebar-account-email">{user.email}</div>
                   </div>
                 </div>
-                <button type="button" className="sidebar-account-action">
+                <button
+                  type="button"
+                  className="sidebar-account-action"
+                  onClick={() => {
+                    setIsAccountMenuOpen(false)
+                    navigate('/app/settings')
+                  }}
+                >
                   <Settings size={14} />
                   账号设置
                 </button>

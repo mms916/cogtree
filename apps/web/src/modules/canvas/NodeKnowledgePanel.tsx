@@ -11,6 +11,9 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import { createPortal } from 'react-dom'
 import {
   Bold,
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
   Calendar,
   Check,
   CheckCircle2,
@@ -34,9 +37,11 @@ import {
   Plus,
   Quote,
   Redo2,
+  Sparkles,
   Target,
   Trash2,
   Type,
+  RemoveFormatting,
   Underline as UnderlineIcon,
   Undo2,
   X,
@@ -44,6 +49,7 @@ import {
 
 import type {
   BaseNode,
+  KnowledgeTitleStyle,
   NodeActionStep,
   NodeKnowledgeItem,
   NodeKnowledgeTag,
@@ -52,6 +58,7 @@ import type {
   QuestionStatus,
   QuestionTemplateType,
 } from '../../stores/useDocumentStore'
+import { useDocumentStore } from '../../stores/useDocumentStore'
 import { getImageFilesFromClipboard, readImageFile } from './imageAttachments'
 
 type LinkedQuoteItem = {
@@ -64,6 +71,7 @@ type LinkedQuoteItem = {
 interface NodeKnowledgePanelProps {
   selectedNode: BaseNode
   linkedQuotes: LinkedQuoteItem[]
+  focusItemId?: string | null
   onClose: () => void
   onUpdateLabel: (label: string) => void
   onUpdateNotes?: (notes: NodeNote[]) => void
@@ -73,6 +81,7 @@ interface NodeKnowledgePanelProps {
 
 type KnowledgeDraft = {
   title: string
+  titleStyle?: KnowledgeTitleStyle
   content: string
   contentHtml: string
   chain: string[]
@@ -120,11 +129,16 @@ type KnowledgeRichEditorProps = {
   initialHtml: string
   placeholder: string
   compact?: boolean
+  titleMode?: boolean
+  titleStyle?: KnowledgeTitleStyle
+  onTitleStyleChange?: (patch: Partial<KnowledgeTitleStyle>) => void
+  onTitleStyleReset?: () => void
+  onBodyFocus?: () => void
   onChange: (payload: { html: string; text: string }) => void
 }
 
 const PANEL_MIN_WIDTH = 380
-const PANEL_MAX_WIDTH = 820
+const PANEL_MAX_WIDTH = 1120
 const PANEL_DEFAULT_WIDTH = 460
 const DEFAULT_TEXT_COLOR = '#e2e8f0'
 const DEFAULT_RECENT_TEXT_COLORS = ['#f8fafc', '#2dd4bf', '#60a5fa', '#f87171']
@@ -404,6 +418,40 @@ const FontSize = Extension.create({
   },
 })
 
+const ParagraphLayout = Extension.create({
+  name: 'paragraphLayout',
+  addGlobalAttributes() {
+    return [
+      {
+        types: ['paragraph', 'heading', 'blockquote'],
+        attributes: {
+          textIndent: {
+            default: null,
+            parseHTML: (element) => element.style.textIndent || null,
+            renderHTML: (attributes) => attributes.textIndent
+              ? { style: `text-indent: ${attributes.textIndent}` }
+              : {},
+          },
+          lineHeight: {
+            default: null,
+            parseHTML: (element) => element.style.lineHeight || null,
+            renderHTML: (attributes) => attributes.lineHeight
+              ? { style: `line-height: ${attributes.lineHeight}` }
+              : {},
+          },
+          textAlign: {
+            default: null,
+            parseHTML: (element) => element.style.textAlign || null,
+            renderHTML: (attributes) => attributes.textAlign
+              ? { style: `text-align: ${attributes.textAlign}` }
+              : {},
+          },
+        },
+      },
+    ]
+  },
+})
+
 const QuoteBlockStyle = Extension.create({
   name: 'quoteBlockStyle',
   addGlobalAttributes() {
@@ -546,6 +594,7 @@ function getKnowledgeItems(selectedNode: BaseNode): NodeKnowledgeItem[] {
         tagId: item.tagId,
         contentType: item.contentType ?? 'custom',
         title: repairLegacyText(item.title) || '\u672a\u547d\u540d\u5185\u5bb9',
+        titleStyle: item.titleStyle,
         content: item.content ?? item.plainText ?? '',
         contentHtml: item.contentHtml,
         plainText: item.plainText ?? item.content ?? getPlainTextFromHtml(item.contentHtml ?? ''),
@@ -634,7 +683,34 @@ function toLegacyNotes(items: NodeKnowledgeItem[]): NodeNote[] {
     }))
 }
 
-function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChange }: KnowledgeRichEditorProps) {
+function getKnowledgeTitleStyle(style?: KnowledgeTitleStyle): CSSProperties {
+  return {
+    fontSize: style?.fontSize ? `${style.fontSize}px` : undefined,
+    color: style?.color,
+    fontWeight: style?.bold ? 800 : undefined,
+    fontStyle: style?.italic ? 'italic' : undefined,
+    textDecoration: style?.underline ? 'underline' : undefined,
+    textAlign: style?.textAlign,
+    justifyContent: style?.textAlign === 'center'
+      ? 'center'
+      : style?.textAlign === 'right'
+        ? 'flex-end'
+        : 'flex-start',
+  }
+}
+
+function KnowledgeRichEditor({
+  initialHtml,
+  placeholder,
+  compact = false,
+  titleMode = false,
+  titleStyle,
+  onTitleStyleChange,
+  onTitleStyleReset,
+  onBodyFocus,
+  onChange,
+}: KnowledgeRichEditorProps) {
+  const editorRootRef = useRef<HTMLDivElement | null>(null)
   const inlineImageInputRef = useRef<HTMLInputElement | null>(null)
   const [isColorPaletteOpen, setIsColorPaletteOpen] = useState(false)
   const [isQuoteBgPaletteOpen, setIsQuoteBgPaletteOpen] = useState(false)
@@ -643,6 +719,25 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
   const [activeTextColor, setActiveTextColor] = useState(DEFAULT_TEXT_COLOR)
   const [activeQuoteBackground, setActiveQuoteBackground] = useState(KNOWLEDGE_QUOTE_BACKGROUNDS[0])
 
+  useEffect(() => {
+    const closePalettes = () => {
+      setIsColorPaletteOpen(false)
+      setIsQuoteBgPaletteOpen(false)
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!editorRootRef.current?.contains(event.target as Node)) {
+        closePalettes()
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown, true)
+    window.addEventListener('blur', closePalettes)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true)
+      window.removeEventListener('blur', closePalettes)
+    }
+  }, [])
+
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -650,6 +745,7 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
       TextStyle,
       Color,
       FontSize,
+      ParagraphLayout,
       QuoteBlockStyle,
       Link.configure({
         openOnClick: false,
@@ -695,6 +791,7 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
         text: activeEditor.getText().trim(),
       })
     },
+    onFocus: () => onBodyFocus?.(),
   })
 
   const runCommand = (event: ReactMouseEvent, command: () => void) => {
@@ -705,13 +802,24 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
 
   const applyTextColor = (color: string) => {
     if (!editor) return
+    if (titleMode) {
+      onTitleStyleChange?.({ color })
+      setIsColorPaletteOpen(false)
+      return
+    }
     setActiveTextColor(color)
     setRecentTextColors((current) => [color, ...current.filter((item) => item !== color)].slice(0, 8))
     editor.chain().focus().setColor(color).run()
+    setIsColorPaletteOpen(false)
   }
 
   const clearTextColor = () => {
     if (!editor) return
+    if (titleMode) {
+      onTitleStyleChange?.({ color: undefined })
+      setIsColorPaletteOpen(false)
+      return
+    }
     setActiveTextColor(DEFAULT_TEXT_COLOR)
     editor.chain().focus().unsetColor().run()
     setIsColorPaletteOpen(false)
@@ -719,7 +827,51 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
 
   const applyFontSize = (fontSize: string) => {
     if (!editor) return
+    if (titleMode) {
+      onTitleStyleChange?.({ fontSize: fontSize ? Number(fontSize) : undefined })
+      return
+    }
     editor.chain().focus().setMark('textStyle', { fontSize: fontSize ? `${fontSize}px` : null }).run()
+  }
+
+  const applyBlockLayout = (
+    attribute: 'textIndent' | 'lineHeight' | 'textAlign',
+    value: string | null
+  ) => {
+    if (!editor) return
+    if (titleMode) {
+      if (attribute === 'textAlign') {
+        onTitleStyleChange?.({ textAlign: value as KnowledgeTitleStyle['textAlign'] })
+      }
+      return
+    }
+    editor.chain()
+      .focus()
+      .updateAttributes('paragraph', { [attribute]: value })
+      .updateAttributes('heading', { [attribute]: value })
+      .updateAttributes('blockquote', { [attribute]: value })
+      .run()
+  }
+
+  const applyEmphasisStyle = () => {
+    if (!editor) return
+    const emphasisColor = '#ef4444'
+    if (titleMode) {
+      onTitleStyleChange?.({ fontSize: 18, color: emphasisColor, bold: true, underline: true })
+      return
+    }
+    setActiveTextColor(emphasisColor)
+    setRecentTextColors((current) => [emphasisColor, ...current.filter((item) => item !== emphasisColor)].slice(0, 8))
+    setIsColorPaletteOpen(false)
+
+    let chain = editor.chain().focus().setMark('textStyle', { fontSize: '18px' }).setColor(emphasisColor)
+    if (!editor.isActive('bold')) {
+      chain = chain.toggleBold()
+    }
+    if (!editor.isActive('underline')) {
+      chain = chain.toggleUnderline()
+    }
+    chain.run()
   }
 
   const applyQuoteBackground = (color: string) => {
@@ -731,6 +883,7 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
       chain.toggleBlockquote()
     }
     chain.updateAttributes('blockquote', { backgroundColor: color }).run()
+    setIsQuoteBgPaletteOpen(false)
   }
 
   const clearQuoteBackground = () => {
@@ -763,7 +916,7 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
   if (!editor) return null
 
   return (
-    <div className={`knowledge-rich-editor knowledge-card-editor${compact ? ' is-compact' : ''}`}>
+    <div ref={editorRootRef} className={`knowledge-rich-editor knowledge-card-editor${compact ? ' is-compact' : ''}`}>
       <input
         ref={inlineImageInputRef}
         type="file"
@@ -777,97 +930,18 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
         }}
       />
       <div className="knowledge-rich-toolbar" aria-label="富文本工具栏">
-        <div className="knowledge-toolbar-group" aria-label="段落">
-          <button type="button" title="正文" className={editor.isActive('paragraph') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setParagraph().run())}><Type size={14} /></button>
-          {!compact && <button type="button" title="一级标题" className={editor.isActive('heading', { level: 1 }) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleHeading({ level: 1 }).run())}><Heading1 size={14} /></button>}
-          {!compact && <button type="button" title="二级标题" className={editor.isActive('heading', { level: 2 }) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleHeading({ level: 2 }).run())}><Heading2 size={14} /></button>}
-        </div>
-        <div className="knowledge-toolbar-group" aria-label="文字格式">
-          <button type="button" title="加粗" className={editor.isActive('bold') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleBold().run())}><Bold size={14} /></button>
-          <button type="button" title="斜体" className={editor.isActive('italic') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleItalic().run())}><Italic size={14} /></button>
-          <button type="button" title="下划线" className={editor.isActive('underline') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleUnderline().run())}><UnderlineIcon size={14} /></button>
-          {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="大号字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: '18px' }).run())}>大</button>}
-          {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="正常字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: null }).run())}>正</button>}
-          {!compact && (
-            <select
-              className="knowledge-rich-font-size"
-              title="字号"
-              defaultValue=""
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => event.stopPropagation()}
-              onChange={(event) => applyFontSize(event.currentTarget.value)}
-            >
-              <option value="">字号</option>
-              <option value="">默认</option>
-              {KNOWLEDGE_FONT_SIZES.map((size) => (
-                <option key={size} value={size}>{size}px</option>
-              ))}
-            </select>
-          )}
-          <div className="knowledge-rich-color-wrap" onMouseDown={(event) => event.stopPropagation()}>
-            <button
-              type="button"
-              className={`knowledge-rich-color-trigger ${isColorPaletteOpen ? 'is-active' : ''}`}
-              title="文字颜色"
-              onMouseDown={(event) => runCommand(event, () => {
-                setIsQuoteBgPaletteOpen(false)
-                setIsColorPaletteOpen((current) => !current)
-              })}
-            >
-              <Palette size={14} />
-              <span style={{ background: activeTextColor }} />
-            </button>
-            {isColorPaletteOpen && (
-              <div className="knowledge-rich-color-popover" onMouseDown={(event) => event.stopPropagation()}>
-                <div className="knowledge-rich-color-section">
-                  <div className="knowledge-rich-color-label">最近使用</div>
-                  <div className="knowledge-rich-color-grid is-recent">
-                    {recentTextColors.map((color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        className={color === activeTextColor ? 'is-active' : ''}
-                        title={color}
-                        style={{ '--swatch-color': color } as CSSProperties}
-                        onMouseDown={(event) => runCommand(event, () => applyTextColor(color))}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <div className="knowledge-rich-color-section">
-                  <div className="knowledge-rich-color-label">推荐颜色</div>
-                  <div className="knowledge-rich-color-grid">
-                    {KNOWLEDGE_TEXT_COLORS.map((color) => (
-                      <button
-                        key={color}
-                        type="button"
-                        className={color === activeTextColor ? 'is-active' : ''}
-                        title={color}
-                        style={{ '--swatch-color': color } as CSSProperties}
-                        onMouseDown={(event) => runCommand(event, () => applyTextColor(color))}
-                      />
-                    ))}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  className="knowledge-rich-color-clear"
-                  onMouseDown={(event) => runCommand(event, clearTextColor)}
-                >
-                  恢复默认
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-        <div className="knowledge-toolbar-group" aria-label="结构">
-          <button type="button" title="无序列表" className={editor.isActive('bulletList') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleBulletList().run())}><List size={14} /></button>
-          {!compact && <button type="button" title="有序列表" className={editor.isActive('orderedList') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleOrderedList().run())}><ListOrdered size={14} /></button>}
-          <button type="button" title="引用" className={editor.isActive('blockquote') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleBlockquote().run())}><Quote size={14} /></button>
+        <div className="knowledge-toolbar-group knowledge-toolbar-paragraph" aria-label="段落">
+          <button type="button" title="正文" disabled={titleMode} className={editor.isActive('paragraph') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setParagraph().run())}><Type size={14} /></button>
+          {!compact && <button type="button" title="一级标题" disabled={titleMode} className={editor.isActive('heading', { level: 1 }) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleHeading({ level: 1 }).run())}><Heading1 size={14} /></button>}
+          {!compact && <button type="button" title="二级标题" disabled={titleMode} className={editor.isActive('heading', { level: 2 }) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleHeading({ level: 2 }).run())}><Heading2 size={14} /></button>}
+          <button type="button" title="无序列表" disabled={titleMode} className={editor.isActive('bulletList') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleBulletList().run())}><List size={14} /></button>
+          {!compact && <button type="button" title="有序列表" disabled={titleMode} className={editor.isActive('orderedList') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleOrderedList().run())}><ListOrdered size={14} /></button>}
+          <button type="button" title="引用" disabled={titleMode} className={editor.isActive('blockquote') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().toggleBlockquote().run())}><Quote size={14} /></button>
           {!compact && (
             <div className="knowledge-rich-color-wrap" onMouseDown={(event) => event.stopPropagation()}>
               <button
                 type="button"
+                disabled={titleMode}
                 className={`knowledge-rich-color-trigger knowledge-rich-quote-bg-trigger ${isQuoteBgPaletteOpen ? 'is-active' : ''}`}
                 title="引用底色"
                 onMouseDown={(event) => runCommand(event, () => {
@@ -921,17 +995,139 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
               )}
             </div>
           )}
+          <button type="button" title="链接" disabled={titleMode} className={editor.isActive('link') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, addLink)}><Link2 size={14} /></button>
+          {!compact && <button type="button" title="插入图片" disabled={titleMode} onMouseDown={(event) => runCommand(event, () => inlineImageInputRef.current?.click())}><ImagePlus size={14} /></button>}
         </div>
-        <div className="knowledge-toolbar-group" aria-label="插入">
-          <button type="button" title="链接" className={editor.isActive('link') ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, addLink)}><Link2 size={14} /></button>
-          {!compact && <button type="button" title="插入图片" onMouseDown={(event) => runCommand(event, () => inlineImageInputRef.current?.click())}><ImagePlus size={14} /></button>}
-        </div>
-        {!compact && (
-          <div className="knowledge-toolbar-group knowledge-toolbar-history" aria-label="历史记录">
-            <button type="button" title="撤销" disabled={!editor.can().undo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().undo().run())}><Undo2 size={14} /></button>
-            <button type="button" title="重做" disabled={!editor.can().redo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().redo().run())}><Redo2 size={14} /></button>
+        <div className="knowledge-toolbar-group knowledge-toolbar-text-format" aria-label="文字格式">
+          <button type="button" title="加粗" className={(titleMode ? titleStyle?.bold : editor.isActive('bold')) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => titleMode ? onTitleStyleChange?.({ bold: !titleStyle?.bold }) : editor.chain().focus().toggleBold().run())}><Bold size={14} /></button>
+          <button type="button" title="斜体" className={(titleMode ? titleStyle?.italic : editor.isActive('italic')) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => titleMode ? onTitleStyleChange?.({ italic: !titleStyle?.italic }) : editor.chain().focus().toggleItalic().run())}><Italic size={14} /></button>
+          <button type="button" title="下划线" className={(titleMode ? titleStyle?.underline : editor.isActive('underline')) ? 'is-active' : ''} onMouseDown={(event) => runCommand(event, () => titleMode ? onTitleStyleChange?.({ underline: !titleStyle?.underline }) : editor.chain().focus().toggleUnderline().run())}><UnderlineIcon size={14} /></button>
+          <button
+            type="button"
+            className="knowledge-rich-emphasis-button"
+            title="重点样式：红色大号加粗下划线"
+            onMouseDown={(event) => runCommand(event, applyEmphasisStyle)}
+          >
+            <Sparkles size={14} />
+          </button>
+          {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="大号字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: '18px' }).run())}>大</button>}
+          {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="正常字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: null }).run())}>正</button>}
+          {!compact && (
+            <select
+              className="knowledge-rich-font-size"
+              title="字号"
+              defaultValue=""
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => applyFontSize(event.currentTarget.value)}
+            >
+              <option value="">字号</option>
+              <option value="">默认</option>
+              {KNOWLEDGE_FONT_SIZES.map((size) => (
+                <option key={size} value={size}>{size}px</option>
+              ))}
+            </select>
+          )}
+          <div className="knowledge-rich-color-wrap" onMouseDown={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className={`knowledge-rich-color-trigger ${isColorPaletteOpen ? 'is-active' : ''}`}
+              title="文字颜色"
+              onMouseDown={(event) => runCommand(event, () => {
+                setIsQuoteBgPaletteOpen(false)
+                setIsColorPaletteOpen((current) => !current)
+              })}
+            >
+              <Palette size={14} />
+              <span style={{ background: titleMode ? titleStyle?.color ?? DEFAULT_TEXT_COLOR : activeTextColor }} />
+            </button>
+            {isColorPaletteOpen && (
+              <div className="knowledge-rich-color-popover" onMouseDown={(event) => event.stopPropagation()}>
+                <div className="knowledge-rich-color-section">
+                  <div className="knowledge-rich-color-label">最近使用</div>
+                  <div className="knowledge-rich-color-grid is-recent">
+                    {recentTextColors.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={color === activeTextColor ? 'is-active' : ''}
+                        title={color}
+                        style={{ '--swatch-color': color } as CSSProperties}
+                        onMouseDown={(event) => runCommand(event, () => applyTextColor(color))}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="knowledge-rich-color-section">
+                  <div className="knowledge-rich-color-label">推荐颜色</div>
+                  <div className="knowledge-rich-color-grid">
+                    {KNOWLEDGE_TEXT_COLORS.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={color === activeTextColor ? 'is-active' : ''}
+                        title={color}
+                        style={{ '--swatch-color': color } as CSSProperties}
+                        onMouseDown={(event) => runCommand(event, () => applyTextColor(color))}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="knowledge-rich-color-clear"
+                  onMouseDown={(event) => runCommand(event, clearTextColor)}
+                >
+                  恢复默认
+                </button>
+              </div>
+            )}
           </div>
-        )}
+          {!compact && <button type="button" title="撤销" disabled={titleMode || !editor.can().undo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().undo().run())}><Undo2 size={14} /></button>}
+          {!compact && <button type="button" title="重做" disabled={titleMode || !editor.can().redo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().redo().run())}><Redo2 size={14} /></button>}
+        </div>
+        <div className="knowledge-toolbar-group knowledge-toolbar-layout" aria-label="段落排版">
+          {!compact && (
+            <select
+              className="knowledge-rich-layout-select"
+              title="首行缩进"
+              disabled={titleMode}
+              defaultValue=""
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => applyBlockLayout('textIndent', event.currentTarget.value || null)}
+            >
+              <option value="">首行缩进</option>
+              <option value="0">无缩进</option>
+              <option value="1em">缩进 1 字符</option>
+              <option value="2em">缩进 2 字符</option>
+              <option value="4em">缩进 4 字符</option>
+            </select>
+          )}
+          {!compact && (
+            <select
+              className="knowledge-rich-layout-select is-line-height"
+              title="行间距"
+              disabled={titleMode}
+              defaultValue=""
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => event.stopPropagation()}
+              onChange={(event) => applyBlockLayout('lineHeight', event.currentTarget.value || null)}
+            >
+              <option value="">行间距</option>
+              <option value="1">1.0</option>
+              <option value="1.25">1.25</option>
+              <option value="1.5">1.5</option>
+              <option value="1.75">1.75</option>
+              <option value="2">2.0</option>
+              <option value="2.5">2.5</option>
+            </select>
+          )}
+          <button type="button" title="左对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'left'))}><AlignLeft size={14} /></button>
+          <button type="button" title="居中对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'center'))}><AlignCenter size={14} /></button>
+          <button type="button" title="右对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'right'))}><AlignRight size={14} /></button>
+          {!compact && <button type="button" title="清除文字和段落格式" onMouseDown={(event) => runCommand(event, () => titleMode ? onTitleStyleReset?.() : editor.chain().focus().unsetAllMarks().clearNodes().run())}><RemoveFormatting size={14} /></button>}
+        </div>
       </div>
       <EditorContent editor={editor} />
     </div>
@@ -941,15 +1137,18 @@ function KnowledgeRichEditor({ initialHtml, placeholder, compact = false, onChan
 export function NodeKnowledgePanel({
   selectedNode,
   linkedQuotes,
+  focusItemId,
   onClose,
   onUpdateLabel,
   onUpdateMeta,
   style,
 }: NodeKnowledgePanelProps) {
+  const documentNodes = useDocumentStore((state) => state.nodes)
   const [panelWidth, setPanelWidth] = useState(() => getPanelWidthFromStyle(style))
   const [activeTagId, setActiveTagId] = useState('quote')
   const [editingItemId, setEditingItemId] = useState<string | null>(null)
   const [draft, setDraft] = useState<KnowledgeDraft>({ title: '', content: '', contentHtml: '<p></p>', chain: [] })
+  const [isTitleToolbarVisible, setIsTitleToolbarVisible] = useState(false)
   const [draggingChainIndex, setDraggingChainIndex] = useState<number | null>(null)
   const [editingChainIndex, setEditingChainIndex] = useState<number | null>(null)
   const [chainContextMenu, setChainContextMenu] = useState<ChainContextMenuState>(null)
@@ -979,8 +1178,12 @@ export function NodeKnowledgePanel({
   const [editingTagDraft, setEditingTagDraft] = useState('')
   const [draggingTagId, setDraggingTagId] = useState<string | null>(null)
   const [dragOverTagId, setDragOverTagId] = useState<string | null>(null)
+  const [isQuoteSourceMenuOpen, setIsQuoteSourceMenuOpen] = useState(false)
+  const [quoteSourceSearchTerm, setQuoteSourceSearchTerm] = useState('')
+  const [recentQuoteSource, setRecentQuoteSource] = useState('')
   const [tagDialog, setTagDialog] = useState<TagDialogState>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+  const quoteSourcePickerRef = useRef<HTMLDivElement | null>(null)
   const latestPanelWidthRef = useRef(panelWidth)
   const hasUserResizedRef = useRef(false)
 
@@ -989,6 +1192,35 @@ export function NodeKnowledgePanel({
   const inspirationCategories = useMemo(() => getInspirationCategories(selectedNode.meta), [selectedNode.id, selectedNode.meta?.inspirationCategories])
   const activeTag = tags.find((tag) => tag.id === activeTagId) ?? tags[0]
   const activeItems = activeTag ? items.filter((item) => item.tagId === activeTag.id) : []
+  const getFocusItemClass = (itemId: string) => focusItemId === itemId ? ' is-search-focused' : ''
+  const quoteSourceOptions = useMemo(() => {
+    const sourceMap = new Map<string, number>()
+    Object.values(documentNodes).forEach((node) => {
+      const knowledgeItems = Array.isArray(node.meta?.knowledgeItems)
+        ? node.meta.knowledgeItems as NodeKnowledgeItem[]
+        : []
+      knowledgeItems.forEach((item) => {
+        if (item.contentType !== 'quote') return
+        const source = (item.sourceBookName || item.title || '').trim()
+        if (!source || isDefaultQuoteTitle(source)) return
+        sourceMap.set(source, Math.max(sourceMap.get(source) ?? 0, item.updatedAt || item.createdAt || 0))
+      })
+    })
+    return Array.from(sourceMap.entries())
+      .map(([source, lastUsedAt]) => ({ source, lastUsedAt }))
+      .sort((left, right) => {
+        if (recentQuoteSource) {
+          if (left.source === recentQuoteSource) return -1
+          if (right.source === recentQuoteSource) return 1
+        }
+        return right.lastUsedAt - left.lastUsedAt || left.source.localeCompare(right.source, 'zh-CN')
+      })
+  }, [documentNodes, recentQuoteSource])
+  const filteredQuoteSourceOptions = useMemo(() => {
+    const keyword = quoteSourceSearchTerm.trim().toLocaleLowerCase()
+    if (!keyword) return quoteSourceOptions
+    return quoteSourceOptions.filter((option) => option.source.toLocaleLowerCase().includes(keyword))
+  }, [quoteSourceOptions, quoteSourceSearchTerm])
   const selectedAction = activeTag?.kind === 'action' && selectedActionId
     ? activeItems.find((item) => item.id === selectedActionId)
     : undefined
@@ -1019,6 +1251,8 @@ export function NodeKnowledgePanel({
     setEditingActionStepDraft('')
     setDraggingTagId(null)
     setDragOverTagId(null)
+    setIsQuoteSourceMenuOpen(false)
+    setQuoteSourceSearchTerm('')
     setSelectedActionId(null)
     setActionContextMenu(null)
     setActionPriorityMenu(null)
@@ -1032,6 +1266,29 @@ export function NodeKnowledgePanel({
       setActiveTagId(tags[0]?.id ?? 'quote')
     }
   }, [activeTagId, tags])
+
+  useEffect(() => {
+    if (!focusItemId) return
+    const targetItem = items.find((item) => item.id === focusItemId)
+    if (!targetItem) return
+
+    setActiveTagId(targetItem.tagId)
+    if (targetItem.contentType === 'action') {
+      setSelectedActionId(targetItem.id)
+    }
+  }, [focusItemId, items])
+
+  useEffect(() => {
+    if (!focusItemId || activeTagId !== items.find((item) => item.id === focusItemId)?.tagId) return
+
+    const timeoutId = window.setTimeout(() => {
+      const targetElement = Array.from(panelRef.current?.querySelectorAll<HTMLElement>('[data-knowledge-item-id]') ?? [])
+        .find((element) => element.dataset.knowledgeItemId === focusItemId)
+      targetElement?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    }, 80)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [activeTagId, focusItemId, items])
 
   useEffect(() => {
     if (!hasUserResizedRef.current) {
@@ -1079,6 +1336,26 @@ export function NodeKnowledgePanel({
       document.removeEventListener('keydown', closeOnEscape)
     }
   }, [actionContextMenu, actionPriorityMenu])
+
+  useEffect(() => {
+    if (!isQuoteSourceMenuOpen) return
+    const closeSourceMenu = (event: MouseEvent) => {
+      if (quoteSourcePickerRef.current?.contains(event.target as Node)) return
+      setIsQuoteSourceMenuOpen(false)
+      setQuoteSourceSearchTerm('')
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setIsQuoteSourceMenuOpen(false)
+      setQuoteSourceSearchTerm('')
+    }
+    document.addEventListener('mousedown', closeSourceMenu)
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('mousedown', closeSourceMenu)
+      document.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [isQuoteSourceMenuOpen])
 
   const persistKnowledgeState = (nextTags: NodeKnowledgeTag[], nextItems: NodeKnowledgeItem[]) => {
     const legacyNotes = toLegacyNotes(nextItems)
@@ -1187,6 +1464,7 @@ export function NodeKnowledgePanel({
   }
 
   const startEditItem = (item: NodeKnowledgeItem) => {
+    setIsTitleToolbarVisible(false)
     setEditingItemId(item.id)
     setQuoteActionMenuId(null)
     setEditingChainIndex(null)
@@ -1205,7 +1483,8 @@ export function NodeKnowledgePanel({
       setActionDraftStatus(getActionStatus(item.status))
     }
     setDraft({
-      title: item.title,
+      title: item.contentType === 'quote' ? item.sourceBookName || item.title : item.title,
+      titleStyle: item.titleStyle,
       content: item.plainText ?? item.content,
       contentHtml: item.contentHtml ?? plainTextToHtml(item.content),
       chain: item.chain ?? (item.contentType === 'case' ? ['触发因素', '过程变化', '结果'] : []),
@@ -1259,6 +1538,7 @@ export function NodeKnowledgePanel({
       persistKnowledgeState(tags, items.filter((item) => item.id !== editingItem.id))
     }
     setEditingItemId(null)
+    setIsTitleToolbarVisible(false)
     setQuoteActionMenuId(null)
     setDraggingChainIndex(null)
     setEditingChainIndex(null)
@@ -1276,6 +1556,8 @@ export function NodeKnowledgePanel({
       return {
         ...item,
         title: nextTitle,
+        titleStyle: item.contentType === 'reflection' ? draft.titleStyle : item.titleStyle,
+        sourceBookName: item.contentType === 'quote' ? nextTitle || undefined : item.sourceBookName,
         content: plainText,
         contentHtml: normalizeEditorHtml(draft.contentHtml || plainTextToHtml(plainText)),
         plainText,
@@ -1292,7 +1574,14 @@ export function NodeKnowledgePanel({
       }
     })
     persistKnowledgeState(tags, nextItems)
+    const savedItem = nextItems.find((item) => item.id === editingItemId)
+    if (savedItem?.contentType === 'quote' && savedItem.sourceBookName) {
+      setRecentQuoteSource(savedItem.sourceBookName)
+    }
     setEditingItemId(null)
+    setIsTitleToolbarVisible(false)
+    setIsQuoteSourceMenuOpen(false)
+    setQuoteSourceSearchTerm('')
     setQuoteActionMenuId(null)
     setDraggingChainIndex(null)
     setEditingChainIndex(null)
@@ -1620,14 +1909,105 @@ export function NodeKnowledgePanel({
     const isQuoteItem = item.contentType === 'quote'
     const isQuestionItem = item.contentType === 'question'
     const isActionItem = item.contentType === 'action'
+    const isReflectionItem = item.contentType === 'reflection'
+    const updateTitleStyle = (patch: Partial<KnowledgeTitleStyle>) => {
+      setDraft((current) => ({
+        ...current,
+        titleStyle: {
+          ...current.titleStyle,
+          ...patch,
+        },
+      }))
+    }
     return (
       <div className="knowledge-item-editor">
-        <input
-          className={`knowledge-item-title-input${isQuoteItem ? ' is-source' : ''}`}
-          value={draft.title}
-          onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
-          placeholder={isQuoteItem ? '\u2014\u2014\u300a\u4e66\u540d\u300b\uff0c\u7b2c x \u9875' : '\u6807\u9898'}
-        />
+        {isQuoteItem ? (
+          <div ref={quoteSourcePickerRef} className="knowledge-source-picker">
+            <input
+              className="knowledge-item-title-input is-source"
+              value={draft.title}
+              onFocus={() => {
+                setIsQuoteSourceMenuOpen(true)
+                setQuoteSourceSearchTerm('')
+              }}
+              onChange={(event) => {
+                const value = event.target.value
+                setDraft((current) => ({ ...current, title: value }))
+                setQuoteSourceSearchTerm(value)
+                setIsQuoteSourceMenuOpen(true)
+              }}
+              placeholder="输入或选择书籍来源"
+              role="combobox"
+              aria-expanded={isQuoteSourceMenuOpen}
+              aria-controls="knowledge-source-options"
+            />
+            <button
+              type="button"
+              className={`knowledge-source-picker-toggle${isQuoteSourceMenuOpen ? ' is-open' : ''}`}
+              title="选择历史来源"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                setIsQuoteSourceMenuOpen((current) => !current)
+                setQuoteSourceSearchTerm('')
+              }}
+            >
+              <ChevronDown size={14} />
+            </button>
+            {isQuoteSourceMenuOpen && (
+              <div id="knowledge-source-options" className="knowledge-source-options" role="listbox">
+                {filteredQuoteSourceOptions.length > 0 ? (
+                  filteredQuoteSourceOptions.map((option, index) => (
+                    <button
+                      key={option.source}
+                      type="button"
+                      role="option"
+                      aria-selected={draft.title === option.source}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setDraft((current) => ({ ...current, title: option.source }))
+                        setRecentQuoteSource(option.source)
+                        setIsQuoteSourceMenuOpen(false)
+                        setQuoteSourceSearchTerm('')
+                      }}
+                    >
+                      <span>{option.source}</span>
+                      {index === 0 && <small>最近使用</small>}
+                    </button>
+                  ))
+                ) : (
+                  <div className="knowledge-source-options-empty">
+                    {quoteSourceOptions.length === 0 ? '保存金句后，来源会出现在这里' : '没有匹配的来源，可直接输入新来源'}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="knowledge-title-editor">
+            <input
+              className="knowledge-item-title-input"
+              type="text"
+              name="knowledge-title-no-autofill"
+              autoComplete="new-password"
+              data-form-type="other"
+              data-lpignore="true"
+              data-1p-ignore="true"
+              value={draft.title}
+              style={isReflectionItem ? getKnowledgeTitleStyle(draft.titleStyle) : undefined}
+              onChange={(event) => setDraft((current) => ({ ...current, title: event.target.value }))}
+              onSelect={(event) => {
+                if (!isReflectionItem) return
+                const input = event.currentTarget
+                setIsTitleToolbarVisible(
+                  input.selectionStart !== null
+                  && input.selectionEnd !== null
+                  && input.selectionEnd > input.selectionStart
+                )
+              }}
+              placeholder="标题"
+            />
+          </div>
+        )}
         {isQuestionItem && (
           <div className="knowledge-question-editor-meta">
             <label>
@@ -1698,6 +2078,11 @@ export function NodeKnowledgePanel({
           <KnowledgeRichEditor
             key={item.id}
             initialHtml={draft.contentHtml}
+            titleMode={isReflectionItem && isTitleToolbarVisible}
+            titleStyle={draft.titleStyle}
+            onTitleStyleChange={updateTitleStyle}
+            onTitleStyleReset={() => setDraft((current) => ({ ...current, titleStyle: undefined }))}
+            onBodyFocus={() => setIsTitleToolbarVisible(false)}
             placeholder={
               item.contentType === 'case'
                 ? '记录案例描述、因果链和结论...'
@@ -2125,7 +2510,11 @@ export function NodeKnowledgePanel({
                 const isEditing = editingItemId === item.id
                 const sourceTitle = isDefaultQuoteTitle(item.title) ? '' : item.title
                 return (
-                  <article key={item.id} className={`knowledge-quote-row is-editable${isEditing ? ' is-editing' : ''}`}>
+                  <article
+                    key={item.id}
+                    data-knowledge-item-id={item.id}
+                    className={`knowledge-quote-row is-editable${isEditing ? ' is-editing' : ''}${getFocusItemClass(item.id)}`}
+                  >
                     {isEditing ? (
                       renderItemEditor(item)
                     ) : (
@@ -2178,13 +2567,17 @@ export function NodeKnowledgePanel({
         {activeItems.map((item) => {
           const isEditing = editingItemId === item.id
           return (
-            <article key={item.id} className="knowledge-reflection-card">
+            <article
+              key={item.id}
+              data-knowledge-item-id={item.id}
+              className={`knowledge-reflection-card${getFocusItemClass(item.id)}`}
+            >
               {isEditing ? (
                 renderItemEditor(item)
               ) : (
                 <>
                   <div className="knowledge-card-head">
-                    <strong><MessageSquareText size={17} /> {item.title}</strong>
+                    <strong style={getKnowledgeTitleStyle(item.titleStyle)}><MessageSquareText size={17} /> {item.title}</strong>
                     <div className="knowledge-quote-row-actions">
                       <button
                         type="button"
@@ -2293,7 +2686,8 @@ export function NodeKnowledgePanel({
           return (
             <article
               key={item.id}
-              className="knowledge-inspiration-card"
+              data-knowledge-item-id={item.id}
+              className={`knowledge-inspiration-card${getFocusItemClass(item.id)}`}
               style={{ '--inspiration-color': categoryColor } as CSSProperties}
             >
               {isEditing ? renderItemEditor(item) : (
@@ -2340,7 +2734,11 @@ export function NodeKnowledgePanel({
           {activeItems.map((item, index) => {
             const isEditing = editingItemId === item.id
             return (
-              <article key={item.id} className="knowledge-case-card">
+              <article
+                key={item.id}
+                data-knowledge-item-id={item.id}
+                className={`knowledge-case-card${getFocusItemClass(item.id)}`}
+              >
                 {isEditing ? renderItemEditor(item) : (
                   <div className="knowledge-case-body">
                     <div className="knowledge-card-head">
@@ -2444,7 +2842,11 @@ export function NodeKnowledgePanel({
               const itemType = getQuestionType(item)
               const itemStatus = getQuestionStatus(item.status)
               return (
-                <article key={item.id} className="knowledge-question-row">
+                <article
+                  key={item.id}
+                  data-knowledge-item-id={item.id}
+                  className={`knowledge-question-row${getFocusItemClass(item.id)}`}
+                >
                   {isEditing ? renderItemEditor(item) : (
                     <>
                       <div className="knowledge-question-main">
@@ -2695,7 +3097,8 @@ export function NodeKnowledgePanel({
               return (
                 <article
                   key={item.id}
-                  className={`knowledge-action-row${depth > 0 ? ' is-child' : ''}${selectedActionId === item.id ? ' is-selected' : ''}${itemStatus === 'done' ? ' is-done' : ''}`}
+                  data-knowledge-item-id={item.id}
+                  className={`knowledge-action-row${depth > 0 ? ' is-child' : ''}${selectedActionId === item.id ? ' is-selected' : ''}${itemStatus === 'done' ? ' is-done' : ''}${getFocusItemClass(item.id)}`}
                   style={{ '--action-depth': Math.min(depth, 4) } as CSSProperties}
                   onClick={() => toggleActionDetail(item.id)}
                   onDoubleClick={() => !isEditing && startEditItem(item)}

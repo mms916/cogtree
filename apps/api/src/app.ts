@@ -701,7 +701,8 @@ function mapBook(book: any) {
   }
 }
 
-function mapQuote(quote: any) {
+function mapQuote(quote: any, options: { includeTreeSnapshot?: boolean } = {}) {
+  const includeTreeSnapshot = options.includeTreeSnapshot ?? true
   const cardMeta = quote.card_meta_json && typeof quote.card_meta_json === 'object' ? quote.card_meta_json : {}
   const quoteMeta = quote.meta_json && typeof quote.meta_json === 'object' ? quote.meta_json : {}
   const treeSnapshot = (cardMeta as any).treeSnapshot
@@ -727,11 +728,15 @@ function mapQuote(quote: any) {
     page: quote.page_label ?? undefined,
     savedAt: quote.card_updated_at ? new Date(quote.card_updated_at).getTime() : undefined,
     treeTitle,
-    nodeCount: treeSnapshot?.nodes ? Object.keys(treeSnapshot.nodes).length : undefined,
+    nodeCount: treeSnapshot?.nodes
+      ? Object.keys(treeSnapshot.nodes).length
+      : typeof quote.tree_node_count === 'number'
+        ? quote.tree_node_count
+        : undefined,
     workspaceVersion: Number(quote.card_workspace_version ?? 1),
     workspaceKeywords,
     quoteCardSummary,
-    treeSnapshot,
+    ...(includeTreeSnapshot ? { treeSnapshot } : {}),
   }
 }
 
@@ -1641,7 +1646,11 @@ async function getLibraryPayload() {
       qc.candidate_nodes_json as card_candidate_nodes_json,
       qc.candidate_edges_json as card_candidate_edges_json,
       qc.notes_json as card_notes_json,
-      qc.meta_json as card_meta_json,
+      qc.meta_json - 'treeSnapshot' as card_meta_json,
+      (
+        select count(*)::int
+        from jsonb_object_keys(coalesce(qc.meta_json #> '{treeSnapshot,nodes}', '{}'::jsonb))
+      ) as tree_node_count,
       qc.updated_at as card_updated_at,
       qc.workspace_version as card_workspace_version
     from quotes q
@@ -1652,7 +1661,7 @@ async function getLibraryPayload() {
   return {
     groups: dbGroups.rows.map(mapGroup),
     books: dbBooks.rows.map(mapBook),
-    quotes: dbQuotes.rows.map(mapQuote),
+    quotes: dbQuotes.rows.map((quote) => mapQuote(quote, { includeTreeSnapshot: false })),
   }
 }
 

@@ -1,4 +1,4 @@
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react'
 import type { Node, NodeProps } from '@xyflow/react'
@@ -46,7 +46,6 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
   const noteEditorRef = useRef<HTMLTextAreaElement | null>(null)
   const updateNodeInternals = useUpdateNodeInternals()
   const selectedEditSessionRef = useRef<string | null>(null)
-  const userInteractedWithEditRef = useRef(false)
   const isComposingRef = useRef(false)
   const [localDraft, setLocalDraft] = useState(data.editDraft)
   const isRoot = data.parentId === null
@@ -90,14 +89,15 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
     isInvalidPreview ? 'is-invalid-preview' : '',
   ].filter(Boolean).join(' ')
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!data.isEditing) return
     setLocalDraft(data.editDraft)
   }, [data.id, data.isEditing, data.editDraft])
 
   useLayoutEffect(() => {
+    if (!isCanvasImage && !isCanvasNote) return
     updateNodeInternals(data.id)
-  }, [data.id, imageSize.width, imageSize.height, noteSize.width, noteSize.height, updateNodeInternals])
+  }, [data.id, imageSize.width, imageSize.height, isCanvasImage, isCanvasNote, noteSize.width, noteSize.height, updateNodeInternals])
 
   useLayoutEffect(() => {
     if (!data.isEditing || (!inputRef.current && !noteEditorRef.current)) return
@@ -113,23 +113,31 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
 
     const focusAndSelect = () => {
       const currentInput = inputRef.current ?? noteEditorRef.current
-      if (!currentInput || userInteractedWithEditRef.current) return
+      if (!currentInput) return
+      if (currentInput.value !== data.editDraft) return
       currentInput.focus({ preventScroll: true })
       currentInput.select()
     }
 
     focusAndSelect()
-    const frameId = window.requestAnimationFrame(focusAndSelect)
+    let secondFrameId = 0
+    let settledSelectionTimer = 0
+    const frameId = window.requestAnimationFrame(() => {
+      focusAndSelect()
+      secondFrameId = window.requestAnimationFrame(focusAndSelect)
+      settledSelectionTimer = window.setTimeout(focusAndSelect, 80)
+    })
 
     return () => {
       window.cancelAnimationFrame(frameId)
+      window.cancelAnimationFrame(secondFrameId)
+      window.clearTimeout(settledSelectionTimer)
     }
-  }, [data.id, data.isEditing])
+  }, [data.editDraft, data.id, data.isEditing])
 
   useLayoutEffect(() => {
     if (data.isEditing) return
     selectedEditSessionRef.current = null
-    userInteractedWithEditRef.current = false
   }, [data.isEditing])
 
   const shouldKeepEditingInsideNote = (event: React.FocusEvent<HTMLElement>) => {
@@ -142,7 +150,7 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
   const shouldSaveAfterBlur = (event: React.FocusEvent<HTMLElement>) => {
     const nodeElement = event.currentTarget.closest('.tree-node')
     const nextFocusedElement = event.relatedTarget as HTMLElement | null
-    return Boolean(nextFocusedElement && (!nodeElement || !nodeElement.contains(nextFocusedElement)))
+    return !nextFocusedElement || !nodeElement || !nodeElement.contains(nextFocusedElement)
   }
 
   const refocusAfterTransientBlur = (input: HTMLInputElement | HTMLTextAreaElement | null) => {
@@ -288,12 +296,10 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
                 isComposingRef.current = false
               }}
               onMouseDown={(event) => {
-                userInteractedWithEditRef.current = true
                 event.stopPropagation()
               }}
               onMouseUp={(event) => event.stopPropagation()}
               onPointerDown={(event) => {
-                userInteractedWithEditRef.current = true
                 event.stopPropagation()
               }}
               onPointerUp={(event) => event.stopPropagation()}
@@ -388,12 +394,10 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
               isComposingRef.current = false
             }}
             onMouseDown={(event) => {
-              userInteractedWithEditRef.current = true
               event.stopPropagation()
             }}
             onMouseUp={(event) => event.stopPropagation()}
             onPointerDown={(event) => {
-              userInteractedWithEditRef.current = true
               event.stopPropagation()
             }}
             onPointerUp={(event) => event.stopPropagation()}

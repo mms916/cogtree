@@ -1,11 +1,20 @@
 import { create } from 'zustand'
 
+export type SearchNavigationTarget = {
+  requestId: number
+  type: 'quote' | 'node' | 'knowledge'
+  quoteId: string
+  nodeId?: string
+  knowledgeItemId?: string
+}
+
 interface UIState {
   leftPanelCollapsed: boolean
   rightPanelCollapsed: boolean
   resourceDrawerOpen: boolean
   resourceDrawerView: 'books' | 'quotes'
   themeDrawerOpen: boolean
+  searchNavigationTarget: SearchNavigationTarget | null
   toggleLeftPanel: () => void
   toggleRightPanel: () => void
   toggleResourceDrawer: () => void
@@ -15,6 +24,8 @@ interface UIState {
   toggleThemeDrawer: () => void
   openThemeDrawer: () => void
   closeThemeDrawer: () => void
+  requestSearchNavigation: (target: Omit<SearchNavigationTarget, 'requestId'>) => void
+  clearSearchNavigation: (requestId?: number) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -23,6 +34,7 @@ export const useUIStore = create<UIState>((set) => ({
   resourceDrawerOpen: false, // Default closed
   resourceDrawerView: 'quotes',
   themeDrawerOpen: false,
+  searchNavigationTarget: null,
   toggleLeftPanel: () => set((state) => ({ leftPanelCollapsed: !state.leftPanelCollapsed })),
   toggleRightPanel: () => set((state) => ({ rightPanelCollapsed: !state.rightPanelCollapsed })),
   toggleResourceDrawer: () => set((state) => ({ resourceDrawerOpen: !state.resourceDrawerOpen })),
@@ -32,4 +44,14 @@ export const useUIStore = create<UIState>((set) => ({
   toggleThemeDrawer: () => set((state) => ({ themeDrawerOpen: !state.themeDrawerOpen })),
   openThemeDrawer: () => set({ themeDrawerOpen: true }),
   closeThemeDrawer: () => set({ themeDrawerOpen: false }),
+  requestSearchNavigation: (target) => set({
+    searchNavigationTarget: {
+      ...target,
+      requestId: Date.now(),
+    },
+  }),
+  clearSearchNavigation: (requestId) => set((state) => {
+    if (typeof requestId === 'number' && state.searchNavigationTarget?.requestId !== requestId) return state
+    return { searchNavigationTarget: null }
+  }),
 }))

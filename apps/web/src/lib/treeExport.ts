@@ -7,6 +7,11 @@ const BRANCH_HEIGHT = 50
 const LEAF_HEIGHT = 28
 const LEAF_MIN_WIDTH = 40
 const LEAF_MAX_WIDTH = 220
+const ROOT_TEXT_MAX_WIDTH = ROOT_WIDTH - 36
+const BRANCH_TEXT_MAX_WIDTH = BRANCH_WIDTH - 58
+const LEAF_LINE_HEIGHT = 24
+const ROOT_LINE_HEIGHT = 23
+const BRANCH_LINE_HEIGHT = 22
 const NODE_MARGIN = 96
 const BRANCH_COLORS = ['#8b5cf6', '#3b82f6', '#14b8a6', '#f59e0b', '#ef4444', '#6366f1']
 
@@ -74,8 +79,75 @@ function getBranchIndex(nodes: Record<string, BaseNode>, nodeId: string) {
   return Math.max(0, branchNode?.orderIndex ?? 0)
 }
 
+function estimateTextWidth(value: string, fontSize: number) {
+  return Array.from(value).reduce((width, char) => {
+    if (/\s/.test(char)) return width + fontSize * 0.35
+    if (/[\u0000-\u007f]/.test(char)) return width + fontSize * 0.58
+    return width + fontSize
+  }, 0)
+}
+
+function wrapText(value: string, maxWidth: number, fontSize: number) {
+  const normalizedLines = value.trim().split(/\r?\n/)
+  const lines = normalizedLines.flatMap((rawLine) => {
+    const sourceLine = rawLine.trim()
+    if (!sourceLine) return ['']
+
+    const wrappedLines: string[] = []
+    let currentLine = ''
+
+    Array.from(sourceLine).forEach((char) => {
+      const candidate = currentLine ? `${currentLine}${char}` : char
+      if (currentLine && estimateTextWidth(candidate, fontSize) > maxWidth) {
+        wrappedLines.push(currentLine)
+        currentLine = char
+      } else {
+        currentLine = candidate
+      }
+    })
+
+    if (currentLine) wrappedLines.push(currentLine)
+    return wrappedLines.length > 0 ? wrappedLines : ['']
+  })
+
+  return lines.length > 0 ? lines : ['']
+}
+
+function getNodeTextLayout(nodes: Record<string, BaseNode>, nodeId: string) {
+  const node = nodes[nodeId]
+  const depth = getDepth(nodes, nodeId)
+  const label = node ? getNodeTitle(node) : ''
+
+  if (depth === 0) {
+    return {
+      lines: wrapText(label, ROOT_TEXT_MAX_WIDTH, 17),
+      fontSize: 17,
+      lineHeight: ROOT_LINE_HEIGHT,
+      maxWidth: ROOT_TEXT_MAX_WIDTH,
+    }
+  }
+
+  if (depth === 1) {
+    return {
+      lines: wrapText(label, BRANCH_TEXT_MAX_WIDTH, 15),
+      fontSize: 15,
+      lineHeight: BRANCH_LINE_HEIGHT,
+      maxWidth: BRANCH_TEXT_MAX_WIDTH,
+    }
+  }
+
+  return {
+    lines: wrapText(label, LEAF_MAX_WIDTH, 16),
+    fontSize: 16,
+    lineHeight: LEAF_LINE_HEIGHT,
+    maxWidth: LEAF_MAX_WIDTH,
+  }
+}
+
 function getNodeSize(nodes: Record<string, BaseNode>, nodeId: string) {
   const node = nodes[nodeId]
+  if (!node) return { width: LEAF_MIN_WIDTH, height: LEAF_HEIGHT }
+
   const imageSize = node?.meta?.canvasImage === true ? node.meta.imageSize : null
   if (
     imageSize &&
@@ -101,13 +173,26 @@ function getNodeSize(nodes: Record<string, BaseNode>, nodeId: string) {
   }
 
   const depth = getDepth(nodes, nodeId)
-  if (depth === 0) return { width: ROOT_WIDTH, height: ROOT_HEIGHT }
-  if (depth === 1) return { width: BRANCH_WIDTH, height: BRANCH_HEIGHT }
+  const textLayout = getNodeTextLayout(nodes, nodeId)
+  if (depth === 0) {
+    return {
+      width: ROOT_WIDTH,
+      height: Math.max(ROOT_HEIGHT, textLayout.lines.length * textLayout.lineHeight + 24)
+    }
+  }
+  if (depth === 1) {
+    return {
+      width: BRANCH_WIDTH,
+      height: Math.max(BRANCH_HEIGHT, textLayout.lines.length * textLayout.lineHeight + 18)
+    }
+  }
 
-  const textLength = Math.max(1, node?.label.trim().length ?? 1)
   return {
-    width: Math.max(LEAF_MIN_WIDTH, Math.min(LEAF_MAX_WIDTH, textLength * 16)),
-    height: LEAF_HEIGHT
+    width: Math.max(
+      LEAF_MIN_WIDTH,
+      Math.min(LEAF_MAX_WIDTH, Math.ceil(Math.max(...textLayout.lines.map((line) => estimateTextWidth(line, 16)))) + 4)
+    ),
+    height: Math.max(LEAF_HEIGHT, textLayout.lines.length * LEAF_LINE_HEIGHT)
   }
 }
 
@@ -125,8 +210,8 @@ function collectBounds(nodes: Record<string, BaseNode>, rootNodeIds: string[]): 
 
   return ids.reduce<ExportBounds>((bounds, nodeId) => {
     const node = nodes[nodeId]
-    const size = getNodeSize(nodes, nodeId)
     if (!node) return bounds
+    const size = getNodeSize(nodes, nodeId)
 
     return {
       minX: Math.min(bounds.minX, node.position.x),
@@ -140,6 +225,25 @@ function collectBounds(nodes: Record<string, BaseNode>, rootNodeIds: string[]): 
     maxX: Number.NEGATIVE_INFINITY,
     maxY: Number.NEGATIVE_INFINITY
   })
+}
+
+function renderTextLines(options: {
+  lines: string[]
+  x: number
+  y: number
+  fill: string
+  fontSize: number
+  fontWeight: number
+  lineHeight: number
+}) {
+  const firstLineY = options.y - ((options.lines.length - 1) * options.lineHeight) / 2
+  const tspans = options.lines
+    .map((line, index) => (
+      `<tspan x="${options.x}" y="${firstLineY + index * options.lineHeight}">${escapeXml(line)}</tspan>`
+    ))
+    .join('')
+
+  return `<text text-anchor="middle" dominant-baseline="middle" fill="${options.fill}" font-size="${options.fontSize}" font-weight="${options.fontWeight}" font-family="Inter, Arial, sans-serif">${tspans}</text>`
 }
 
 function getNodeTitle(node: BaseNode) {
@@ -237,6 +341,22 @@ function getKnowledgeSections(node: BaseNode): Array<{ title: string; items: str
     .filter((section) => section.items.length > 0)
 }
 
+function encodeKnowledgeMetadata(node: BaseNode) {
+  const knowledgeTags = Array.isArray(node.meta?.knowledgeTags) ? node.meta.knowledgeTags : []
+  const knowledgeItems = Array.isArray(node.meta?.knowledgeItems) ? node.meta.knowledgeItems : []
+  const notes = Array.isArray(node.meta?.notes) ? node.meta.notes : []
+  const inspirationCategories = Array.isArray(node.meta?.inspirationCategories) ? node.meta.inspirationCategories : []
+  if (knowledgeTags.length === 0 && knowledgeItems.length === 0 && notes.length === 0 && inspirationCategories.length === 0) {
+    return ''
+  }
+  return encodeURIComponent(JSON.stringify({
+    knowledgeTags,
+    knowledgeItems,
+    notes,
+    inspirationCategories,
+  }))
+}
+
 function walkOutlineMarkdown(nodes: Record<string, BaseNode>, nodeId: string, depth = 0): string[] {
   const node = nodes[nodeId]
   if (!node) return []
@@ -260,8 +380,11 @@ function walkKnowledgeMarkdown(
   const headingLevel = Math.min(depth + 2, 6)
   const notes = node.meta?.notes ?? []
   const knowledgeSections = getKnowledgeSections(node)
+  const encodedKnowledgeMetadata = encodeKnowledgeMetadata(node)
   const lines = [
+    `<!-- cogtree-node-depth: ${depth} -->`,
     `${'#'.repeat(headingLevel)} ${getNodeTitle(node)}`,
+    ...(encodedKnowledgeMetadata ? [`<!-- cogtree-knowledge: ${encodedKnowledgeMetadata} -->`] : []),
     '',
     `- 节点类型：${NODE_TYPE_LABELS[node.nodeType] ?? node.nodeType}`,
     `- 重要节点：${node.meta?.isImportant === true ? '是' : '否'}`
@@ -368,10 +491,10 @@ function buildTreeSvg(nodes: Record<string, BaseNode>, rootNodeIds: string[], ti
   const nodeMarkup = visibleNodes.map((node) => {
     const depth = getDepth(nodes, node.id)
     const size = getNodeSize(nodes, node.id)
+    const textLayout = getNodeTextLayout(nodes, node.id)
     const color = getNodeColor(nodes, node.id)
     const x = node.position.x + offsetX
     const y = node.position.y + offsetY
-    const label = escapeXml(getNodeTitle(node))
     const isImportant = node.meta?.isImportant === true
     const textColor = isImportant ? '#ff6b6b' : '#e8f0ff'
     const strokeColor = isImportant ? '#ff6b6b' : color
@@ -391,14 +514,31 @@ function buildTreeSvg(nodes: Record<string, BaseNode>, rootNodeIds: string[], ti
     }
 
     if (depth >= 2) {
-      return `<text x="${x + size.width / 2}" y="${y + size.height / 2 + 8}" text-anchor="middle" fill="${textColor}" font-size="18" font-weight="600" font-family="Inter, Arial, sans-serif">${label}</text>`
+      return renderTextLines({
+        lines: textLayout.lines,
+        x: x + size.width / 2,
+        y: y + size.height / 2,
+        fill: textColor,
+        fontSize: 16,
+        fontWeight: 600,
+        lineHeight: LEAF_LINE_HEIGHT,
+      })
     }
 
     const iconSpace = depth === 1 ? 34 : 0
+    const textCenterX = x + size.width / 2 + iconSpace / 2
     return `
       <rect x="${x}" y="${y}" width="${size.width}" height="${size.height}" rx="8" fill="#111722" stroke="${strokeColor}" stroke-width="${depth === 0 ? 1.8 : 1.5}" filter="url(#softGlow)" />
       ${depth === 1 ? `<circle cx="${x + 26}" cy="${y + size.height / 2}" r="8" fill="none" stroke="#e8f0ff" stroke-width="1.8" opacity="0.95" />` : ''}
-      <text x="${x + size.width / 2 + iconSpace / 2}" y="${y + size.height / 2 + 7}" text-anchor="middle" fill="${textColor}" font-size="${depth === 0 ? 20 : 17}" font-weight="700" font-family="Inter, Arial, sans-serif">${label}</text>
+      ${renderTextLines({
+        lines: textLayout.lines,
+        x: textCenterX,
+        y: y + size.height / 2,
+        fill: textColor,
+        fontSize: depth === 0 ? 17 : 15,
+        fontWeight: 700,
+        lineHeight: depth === 0 ? ROOT_LINE_HEIGHT : BRANCH_LINE_HEIGHT,
+      })}
     `
   }).join('\n')
 
@@ -427,6 +567,15 @@ function downloadBlob(filename: string, blob: Blob) {
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+export function downloadTreeSvg(
+  nodes: Record<string, BaseNode>,
+  rootNodeIds: string[],
+  title?: string
+) {
+  const { svg } = buildTreeSvg(nodes, rootNodeIds, title)
+  downloadBlob(`${sanitizeFilename(title ?? 'cogtree')}.svg`, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }))
 }
 
 export async function downloadTreeImage(

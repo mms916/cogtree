@@ -5,6 +5,7 @@ import { BooksPage } from '../pages/BooksPage'
 import { LoginPage } from '../pages/LoginPage'
 import { QuotesPage } from '../pages/QuotesPage'
 import { ReviewsPage } from '../pages/ReviewsPage'
+import { SearchPage } from '../pages/SearchPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { ThemeLibraryPage } from '../pages/ThemeLibraryPage'
 import { ThemeTreePage } from '../pages/ThemeTreePage'
@@ -28,6 +29,7 @@ export const router = createBrowserRouter([
       { path: 'theme-tree', element: <ThemeTreePage /> },
       { path: 'theme-tree/:themeId', element: <ThemeTreePage /> },
       { path: 'reviews', element: <ReviewsPage /> },
+      { path: 'search', element: <SearchPage /> },
       { path: 'settings', element: <SettingsPage /> },
     ],
   },
