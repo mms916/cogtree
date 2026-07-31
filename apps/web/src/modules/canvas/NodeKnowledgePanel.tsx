@@ -4,7 +4,7 @@ import { Extension } from '@tiptap/core'
 import Image from '@tiptap/extension-image'
 import Link from '@tiptap/extension-link'
 import Color from '@tiptap/extension-color'
-import { TextStyle } from '@tiptap/extension-text-style'
+import { BackgroundColor, TextStyle } from '@tiptap/extension-text-style'
 import Underline from '@tiptap/extension-underline'
 import StarterKit from '@tiptap/starter-kit'
 import { EditorContent, useEditor } from '@tiptap/react'
@@ -24,6 +24,7 @@ import {
   Grid2X2,
   Heading1,
   Heading2,
+  Highlighter,
   ImagePlus,
   Italic,
   Lightbulb,
@@ -142,6 +143,7 @@ const PANEL_MAX_WIDTH = 1120
 const PANEL_DEFAULT_WIDTH = 460
 const DEFAULT_TEXT_COLOR = '#e2e8f0'
 const DEFAULT_RECENT_TEXT_COLORS = ['#f8fafc', '#2dd4bf', '#60a5fa', '#f87171']
+const DEFAULT_TEXT_BACKGROUND = 'rgba(250, 204, 21, 0.32)'
 const KNOWLEDGE_FONT_SIZES = [8, 10, 12, 14, 16, 18, 20, 24, 28, 32]
 const INSPIRATION_CATEGORY_COLORS = ['#38bdf8', '#a78bfa', '#34d399', '#f59e0b', '#f472b6', '#60a5fa']
 const DEFAULT_INSPIRATION_CATEGORIES: InspirationCategory[] = [
@@ -378,6 +380,19 @@ const KNOWLEDGE_QUOTE_BACKGROUNDS = [
   'rgba(51, 65, 85, 0.72)',
 ]
 
+const KNOWLEDGE_TEXT_BACKGROUNDS = [
+  'rgba(250, 204, 21, 0.32)',
+  'rgba(251, 146, 60, 0.3)',
+  'rgba(248, 113, 113, 0.3)',
+  'rgba(244, 114, 182, 0.28)',
+  'rgba(167, 139, 250, 0.3)',
+  'rgba(96, 165, 250, 0.3)',
+  'rgba(56, 189, 248, 0.28)',
+  'rgba(45, 212, 191, 0.28)',
+  'rgba(74, 222, 128, 0.28)',
+  'rgba(148, 163, 184, 0.28)',
+]
+
 const LEGACY_TEXT_REPAIRS: Record<string, string> = {
   '閲戝彞': '金句',
   '鐏垫劅': '灵感',
@@ -427,6 +442,7 @@ const ParagraphLayout = Extension.create({
         attributes: {
           textIndent: {
             default: null,
+            keepOnSplit: true,
             parseHTML: (element) => element.style.textIndent || null,
             renderHTML: (attributes) => attributes.textIndent
               ? { style: `text-indent: ${attributes.textIndent}` }
@@ -434,6 +450,7 @@ const ParagraphLayout = Extension.create({
           },
           lineHeight: {
             default: null,
+            keepOnSplit: true,
             parseHTML: (element) => element.style.lineHeight || null,
             renderHTML: (attributes) => attributes.lineHeight
               ? { style: `line-height: ${attributes.lineHeight}` }
@@ -441,6 +458,7 @@ const ParagraphLayout = Extension.create({
           },
           textAlign: {
             default: null,
+            keepOnSplit: true,
             parseHTML: (element) => element.style.textAlign || null,
             renderHTML: (attributes) => attributes.textAlign
               ? { style: `text-align: ${attributes.textAlign}` }
@@ -713,15 +731,19 @@ function KnowledgeRichEditor({
   const editorRootRef = useRef<HTMLDivElement | null>(null)
   const inlineImageInputRef = useRef<HTMLInputElement | null>(null)
   const [isColorPaletteOpen, setIsColorPaletteOpen] = useState(false)
+  const [isTextBgPaletteOpen, setIsTextBgPaletteOpen] = useState(false)
   const [isQuoteBgPaletteOpen, setIsQuoteBgPaletteOpen] = useState(false)
   const [recentTextColors, setRecentTextColors] = useState(DEFAULT_RECENT_TEXT_COLORS)
+  const [recentTextBackgrounds, setRecentTextBackgrounds] = useState(KNOWLEDGE_TEXT_BACKGROUNDS.slice(0, 4))
   const [recentQuoteBackgrounds, setRecentQuoteBackgrounds] = useState(KNOWLEDGE_QUOTE_BACKGROUNDS.slice(0, 4))
   const [activeTextColor, setActiveTextColor] = useState(DEFAULT_TEXT_COLOR)
+  const [activeTextBackground, setActiveTextBackground] = useState(DEFAULT_TEXT_BACKGROUND)
   const [activeQuoteBackground, setActiveQuoteBackground] = useState(KNOWLEDGE_QUOTE_BACKGROUNDS[0])
 
   useEffect(() => {
     const closePalettes = () => {
       setIsColorPaletteOpen(false)
+      setIsTextBgPaletteOpen(false)
       setIsQuoteBgPaletteOpen(false)
     }
     const handlePointerDown = (event: PointerEvent) => {
@@ -744,6 +766,7 @@ function KnowledgeRichEditor({
       Underline,
       TextStyle,
       Color,
+      BackgroundColor,
       FontSize,
       ParagraphLayout,
       QuoteBlockStyle,
@@ -825,6 +848,21 @@ function KnowledgeRichEditor({
     setIsColorPaletteOpen(false)
   }
 
+  const applyTextBackground = (color: string) => {
+    if (!editor || titleMode) return
+    setActiveTextBackground(color)
+    setRecentTextBackgrounds((current) => [color, ...current.filter((item) => item !== color)].slice(0, 8))
+    editor.chain().focus().setBackgroundColor(color).run()
+    setIsTextBgPaletteOpen(false)
+  }
+
+  const clearTextBackground = () => {
+    if (!editor || titleMode) return
+    setActiveTextBackground(DEFAULT_TEXT_BACKGROUND)
+    editor.chain().focus().unsetBackgroundColor().run()
+    setIsTextBgPaletteOpen(false)
+  }
+
   const applyFontSize = (fontSize: string) => {
     if (!editor) return
     if (titleMode) {
@@ -845,11 +883,69 @@ function KnowledgeRichEditor({
       }
       return
     }
+
+    if (attribute === 'textIndent') {
+      editor.commands.focus()
+      const { state, view } = editor
+      const transaction = state.tr
+
+      state.doc.descendants((node, position) => {
+        if (!['paragraph', 'heading', 'blockquote'].includes(node.type.name)) return
+        if (node.attrs.textIndent === value) return
+        transaction.setNodeMarkup(position, undefined, {
+          ...node.attrs,
+          textIndent: value,
+        })
+      })
+
+      if (transaction.docChanged) {
+        view.dispatch(transaction)
+      }
+      return
+    }
+
     editor.chain()
       .focus()
       .updateAttributes('paragraph', { [attribute]: value })
       .updateAttributes('heading', { [attribute]: value })
       .updateAttributes('blockquote', { [attribute]: value })
+      .run()
+  }
+
+  const clearEditorFormatting = () => {
+    if (!editor) return
+    setIsColorPaletteOpen(false)
+    setIsTextBgPaletteOpen(false)
+    setIsQuoteBgPaletteOpen(false)
+    setActiveTextColor(DEFAULT_TEXT_COLOR)
+    setActiveTextBackground(DEFAULT_TEXT_BACKGROUND)
+    setActiveQuoteBackground(KNOWLEDGE_QUOTE_BACKGROUNDS[0])
+
+    if (titleMode) {
+      onTitleStyleReset?.()
+      return
+    }
+
+    editor.chain()
+      .focus()
+      .unsetAllMarks()
+      .clearNodes()
+      .updateAttributes('paragraph', {
+        textIndent: null,
+        lineHeight: null,
+        textAlign: null,
+      })
+      .updateAttributes('heading', {
+        textIndent: null,
+        lineHeight: null,
+        textAlign: null,
+      })
+      .updateAttributes('blockquote', {
+        textIndent: null,
+        lineHeight: null,
+        textAlign: null,
+        backgroundColor: null,
+      })
       .run()
   }
 
@@ -946,6 +1042,7 @@ function KnowledgeRichEditor({
                 title="引用底色"
                 onMouseDown={(event) => runCommand(event, () => {
                   setIsColorPaletteOpen(false)
+                  setIsTextBgPaletteOpen(false)
                   setIsQuoteBgPaletteOpen((current) => !current)
                 })}
               >
@@ -1010,6 +1107,15 @@ function KnowledgeRichEditor({
           >
             <Sparkles size={14} />
           </button>
+          <button
+            type="button"
+            className="knowledge-rich-clear-format-button"
+            title="清除所选文字和段落格式"
+            onMouseDown={(event) => runCommand(event, clearEditorFormatting)}
+          >
+            <RemoveFormatting size={14} />
+            <span>清</span>
+          </button>
           {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="大号字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: '18px' }).run())}>大</button>}
           {!compact && <button type="button" className="knowledge-toolbar-text-btn" title="正常字体" onMouseDown={(event) => runCommand(event, () => editor.chain().focus().setMark('textStyle', { fontSize: null }).run())}>正</button>}
           {!compact && (
@@ -1034,6 +1140,7 @@ function KnowledgeRichEditor({
               className={`knowledge-rich-color-trigger ${isColorPaletteOpen ? 'is-active' : ''}`}
               title="文字颜色"
               onMouseDown={(event) => runCommand(event, () => {
+                setIsTextBgPaletteOpen(false)
                 setIsQuoteBgPaletteOpen(false)
                 setIsColorPaletteOpen((current) => !current)
               })}
@@ -1083,6 +1190,63 @@ function KnowledgeRichEditor({
               </div>
             )}
           </div>
+          <div className="knowledge-rich-color-wrap" onMouseDown={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              disabled={titleMode}
+              className={`knowledge-rich-color-trigger knowledge-rich-text-bg-trigger ${isTextBgPaletteOpen ? 'is-active' : ''}`}
+              title="文字填充底色"
+              onMouseDown={(event) => runCommand(event, () => {
+                setIsColorPaletteOpen(false)
+                setIsQuoteBgPaletteOpen(false)
+                setIsTextBgPaletteOpen((current) => !current)
+              })}
+            >
+              <Highlighter size={14} />
+              <span style={{ background: activeTextBackground }} />
+            </button>
+            {isTextBgPaletteOpen && (
+              <div className="knowledge-rich-color-popover knowledge-rich-text-bg-popover" onMouseDown={(event) => event.stopPropagation()}>
+                <div className="knowledge-rich-color-section">
+                  <div className="knowledge-rich-color-label">最近使用</div>
+                  <div className="knowledge-rich-color-grid is-recent">
+                    {recentTextBackgrounds.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={color === activeTextBackground ? 'is-active' : ''}
+                        title={color}
+                        style={{ '--swatch-color': color } as CSSProperties}
+                        onMouseDown={(event) => runCommand(event, () => applyTextBackground(color))}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="knowledge-rich-color-section">
+                  <div className="knowledge-rich-color-label">文字底色</div>
+                  <div className="knowledge-rich-color-grid">
+                    {KNOWLEDGE_TEXT_BACKGROUNDS.map((color) => (
+                      <button
+                        key={color}
+                        type="button"
+                        className={color === activeTextBackground ? 'is-active' : ''}
+                        title={color}
+                        style={{ '--swatch-color': color } as CSSProperties}
+                        onMouseDown={(event) => runCommand(event, () => applyTextBackground(color))}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="knowledge-rich-color-clear"
+                  onMouseDown={(event) => runCommand(event, clearTextBackground)}
+                >
+                  清除文字底色
+                </button>
+              </div>
+            )}
+          </div>
           {!compact && <button type="button" title="撤销" disabled={titleMode || !editor.can().undo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().undo().run())}><Undo2 size={14} /></button>}
           {!compact && <button type="button" title="重做" disabled={titleMode || !editor.can().redo()} onMouseDown={(event) => runCommand(event, () => editor.chain().focus().redo().run())}><Redo2 size={14} /></button>}
         </div>
@@ -1126,7 +1290,6 @@ function KnowledgeRichEditor({
           <button type="button" title="左对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'left'))}><AlignLeft size={14} /></button>
           <button type="button" title="居中对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'center'))}><AlignCenter size={14} /></button>
           <button type="button" title="右对齐" onMouseDown={(event) => runCommand(event, () => applyBlockLayout('textAlign', 'right'))}><AlignRight size={14} /></button>
-          {!compact && <button type="button" title="清除文字和段落格式" onMouseDown={(event) => runCommand(event, () => titleMode ? onTitleStyleReset?.() : editor.chain().focus().unsetAllMarks().clearNodes().run())}><RemoveFormatting size={14} /></button>}
         </div>
       </div>
       <EditorContent editor={editor} />

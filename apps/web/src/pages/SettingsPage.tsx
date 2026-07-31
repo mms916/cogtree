@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { ArchiveRestore, DatabaseBackup, Download, Upload, X } from 'lucide-react'
+import { ArchiveRestore, DatabaseBackup, Download, Layers3, Plus, Trash2, Upload, X } from 'lucide-react'
 
 import { fetchJson } from '../lib/api'
 import {
@@ -12,8 +12,42 @@ import {
 import type { BookBackup, LibraryBackup } from '../lib/workspaceBackup'
 import type { Book, QuoteItem } from '../stores/useLibraryStore'
 import { useLibraryStore } from '../stores/useLibraryStore'
+import { useCanvasPreferencesStore } from '../stores/useCanvasPreferencesStore'
+import type { FrameworkTemplateNode } from '../stores/useCanvasPreferencesStore'
 
 type RestorableBackup = BookBackup | LibraryBackup
+
+function TemplateNodeEditor({
+  node,
+  templateId,
+  depth,
+  canDelete = true,
+}: {
+  node: FrameworkTemplateNode
+  templateId: string
+  depth: number
+  canDelete?: boolean
+}) {
+  const { addTemplateNode, updateTemplateNode, deleteTemplateNode } = useCanvasPreferencesStore()
+
+  return (
+    <div className="settings-template-node" style={{ marginLeft: depth * 22 }}>
+      <div className="settings-template-node-row">
+        <span className="settings-template-branch">{depth > 0 ? '└' : '•'}</span>
+        <input
+          value={node.label}
+          placeholder="节点内容"
+          onChange={(event) => updateTemplateNode(templateId, node.id, { label: event.target.value })}
+        />
+        <button type="button" title="添加子节点" onClick={() => addTemplateNode(templateId, node.id)}><Plus size={14} /></button>
+        <button type="button" title={canDelete ? '删除节点' : '框架至少保留两个一级节点'} disabled={!canDelete} className="is-danger" onClick={() => deleteTemplateNode(templateId, node.id)}><Trash2 size={14} /></button>
+      </div>
+      {node.children.map((child) => (
+        <TemplateNodeEditor key={child.id} node={child} templateId={templateId} depth={depth + 1} />
+      ))}
+    </div>
+  )
+}
 
 export function SettingsPage() {
   const backupInputRef = useRef<HTMLInputElement | null>(null)
@@ -21,6 +55,13 @@ export function SettingsPage() {
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [isWorking, setIsWorking] = useState(false)
+  const {
+    frameworkTemplates,
+    addFrameworkTemplate,
+    updateFrameworkTemplate,
+    deleteFrameworkTemplate,
+    addTemplateNode,
+  } = useCanvasPreferencesStore()
   const {
     books,
     quotes,
@@ -171,6 +212,45 @@ export function SettingsPage() {
           <p className="muted">管理 CogTree 的数据备份与恢复。</p>
         </div>
       </header>
+
+      <section className="settings-section">
+        <div className="settings-section-heading">
+          <Layers3 size={20} />
+          <div>
+            <h2>框架模板</h2>
+            <p>自定义节点右键菜单中的框架。模板支持任意层级，每一层都可以设置节点文字。</p>
+          </div>
+          <button type="button" className="primary-button" onClick={addFrameworkTemplate}><Plus size={16} /> 新建模板</button>
+        </div>
+        <div className="settings-template-list">
+          {frameworkTemplates.map((template) => (
+            <article key={template.id} className="settings-template-card">
+              <div className="settings-template-header">
+                <input
+                  value={template.name}
+                  aria-label="框架名称"
+                  onChange={(event) => updateFrameworkTemplate(template.id, { name: event.target.value })}
+                />
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={template.enabled}
+                    onChange={(event) => updateFrameworkTemplate(template.id, { enabled: event.target.checked })}
+                  />
+                  显示在右键菜单
+                </label>
+                <button type="button" className="is-danger" title="删除模板" onClick={() => deleteFrameworkTemplate(template.id)}><Trash2 size={15} /></button>
+              </div>
+              <div className="settings-template-tree">
+                {template.nodes.map((node) => (
+                  <TemplateNodeEditor key={node.id} node={node} templateId={template.id} depth={0} canDelete={template.nodes.length > 2} />
+                ))}
+              </div>
+              <button type="button" className="secondary-button" disabled={template.nodes.length >= 5} onClick={() => addTemplateNode(template.id)}><Plus size={15} /> {template.nodes.length >= 5 ? '最多 5 个一级节点' : '添加一级节点'}</button>
+            </article>
+          ))}
+        </div>
+      </section>
 
       <section className="settings-section">
         <div className="settings-section-heading">

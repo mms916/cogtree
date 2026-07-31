@@ -220,6 +220,7 @@ const quoteWorkspaceSchema = z.object({
   quoteId: z.string().uuid().nullable().optional(),
   bookId: z.string().uuid(),
   text: z.string().trim().min(1),
+  textHtml: z.string().max(20000).optional(),
   nodes: z.record(z.string(), z.unknown()),
   rootNodeIds: z.array(z.string()),
   treeTitle: z.string().trim().optional(),
@@ -707,6 +708,7 @@ function mapQuote(quote: any, options: { includeTreeSnapshot?: boolean } = {}) {
   const quoteMeta = quote.meta_json && typeof quote.meta_json === 'object' ? quote.meta_json : {}
   const treeSnapshot = (cardMeta as any).treeSnapshot
   const treeTitle = (quoteMeta as any).treeTitle || (cardMeta as any).treeTitle
+  const textHtml = (quoteMeta as any).textHtml || (cardMeta as any).textHtml
   const workspaceKeywords = Array.isArray(quote.card_keywords_json) ? quote.card_keywords_json : []
   const quoteCardSummary = {
     causeList: Array.isArray(quote.card_cause_list_json) ? quote.card_cause_list_json : [],
@@ -723,6 +725,7 @@ function mapQuote(quote: any, options: { includeTreeSnapshot?: boolean } = {}) {
     id: quote.id,
     bookId: quote.book_id,
     text: quote.original_text,
+    textHtml: typeof textHtml === 'string' ? textHtml : undefined,
     status: quote.extraction_status === 'extracted' ? 'extracted' : 'pending',
     tags: Array.isArray(quote.tags_json) ? quote.tags_json : [],
     page: quote.page_label ?? undefined,
@@ -1234,7 +1237,7 @@ async function persistQuoteWorkspaceSnapshot(
             updated_at = now()
         where id = $1
       `,
-      [quoteId, data.text, JSON.stringify({ treeTitle })],
+      [quoteId, data.text, JSON.stringify({ treeTitle, textHtml: data.textHtml })],
     )
   } else {
     await client.query(
@@ -1242,7 +1245,7 @@ async function persistQuoteWorkspaceSnapshot(
         insert into quotes (id, book_id, original_text, extraction_status, tags_json, meta_json)
         values ($1, $2, $3, 'extracted', $4::jsonb, $5::jsonb)
       `,
-      [quoteId, data.bookId, data.text, JSON.stringify(['已保存']), JSON.stringify({ treeTitle })],
+      [quoteId, data.bookId, data.text, JSON.stringify(['已保存']), JSON.stringify({ treeTitle, textHtml: data.textHtml })],
     )
   }
 
@@ -1295,7 +1298,7 @@ async function persistQuoteWorkspaceSnapshot(
       JSON.stringify(derivedFields.candidateNodes),
       JSON.stringify(derivedFields.candidateEdges),
       JSON.stringify(derivedFields.notes),
-      JSON.stringify({ treeTitle, treeSnapshot }),
+      JSON.stringify({ treeTitle, treeSnapshot, textHtml: data.textHtml }),
     ],
   )
 

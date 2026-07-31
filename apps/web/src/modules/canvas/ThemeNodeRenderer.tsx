@@ -2,9 +2,10 @@ import { memo, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { Handle, Position, useUpdateNodeInternals } from '@xyflow/react'
 import type { Node, NodeProps } from '@xyflow/react'
-import { Gift, Heart, Lightbulb, Rocket, Shield, Sparkles, Users } from 'lucide-react'
+import { Sparkles } from 'lucide-react'
 
 import type { BaseNode } from '../../stores/useDocumentStore'
+import { getNodeSymbol, NodeSymbolIcon } from './nodeSymbols'
 
 type ThemeNodeData = Node<
   BaseNode & {
@@ -32,13 +33,16 @@ type ThemeNodeData = Node<
   }
 >
 
-const branchIcons = {
-  gift: Gift,
-  heart: Heart,
-  lightbulb: Lightbulb,
-  rocket: Rocket,
-  shield: Shield,
-  users: Users,
+function getEditInputWidth(text: string, fallbackText: string) {
+  const value = text || fallbackText || ' '
+  const visualWidth = Array.from(value).reduce((total, char) => {
+    if (/[\u4e00-\u9fff]/.test(char)) return total + 15
+    if (/\s/.test(char)) return total + 5
+    if (/[A-Z]/.test(char)) return total + 10
+    return total + 8
+  }, 0)
+
+  return Math.max(28, Math.min(420, Math.ceil(visualWidth) + 18))
 }
 
 export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeData>) => {
@@ -69,12 +73,19 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
   const noteBody = typeof data.meta?.noteBody === 'string'
     ? data.meta.noteBody
     : '在这里记录这个洞见的背景、判断和下一步行动。'
-  const Icon = branchIcons[data.branchIcon as keyof typeof branchIcons] ?? Lightbulb
   const isChildPreview = data.isDropTarget && data.dropPreviewMode === 'child'
   const isSiblingPreview = data.isDropTarget && data.dropPreviewMode === 'sibling'
   const isInvalidPreview = data.isDropTarget && data.dropPreviewMode === 'invalid'
   const isImportant = data.meta?.isImportant === true
   const nodeColor = isImportant ? '#ef4444' : isRoot ? '#4f46e5' : data.branchColor
+  const customNodeStyle = (data.meta?.nodeStyle ?? {}) as {
+    borderStyle?: CSSProperties['borderStyle']
+    borderWidth?: number
+    borderColor?: string
+    fillColor?: string
+  }
+  const nodeSymbol = typeof data.meta?.symbol === 'string' ? data.meta.symbol : ''
+  const semanticSymbol = getNodeSymbol(typeof data.meta?.nodeSymbolId === 'string' ? data.meta.nodeSymbolId : undefined)
   const nodeClassName = [
     'tree-node',
     isRoot ? 'tree-node-root' : '',
@@ -83,11 +94,14 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
     isCanvasImage ? 'tree-node-image' : '',
     isCanvasNote ? 'tree-node-note' : '',
     isImportant ? 'is-important' : '',
+    customNodeStyle.borderStyle && customNodeStyle.borderStyle !== 'none' ? 'has-custom-frame' : '',
     selected ? 'is-selected' : '',
+    data.isEditing ? 'is-editing' : '',
     isChildPreview ? 'is-child-preview' : '',
     isSiblingPreview ? 'is-sibling-preview' : '',
     isInvalidPreview ? 'is-invalid-preview' : '',
   ].filter(Boolean).join(' ')
+  const editInputWidth = getEditInputWidth(localDraft, data.label)
 
   useLayoutEffect(() => {
     if (!data.isEditing) return
@@ -98,6 +112,29 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
     if (!isCanvasImage && !isCanvasNote) return
     updateNodeInternals(data.id)
   }, [data.id, imageSize.width, imageSize.height, isCanvasImage, isCanvasNote, noteSize.width, noteSize.height, updateNodeInternals])
+
+  useLayoutEffect(() => {
+    updateNodeInternals(data.id)
+    const frameId = window.requestAnimationFrame(() => updateNodeInternals(data.id))
+    return () => window.cancelAnimationFrame(frameId)
+  }, [
+    customNodeStyle.borderStyle,
+    customNodeStyle.borderWidth,
+    customNodeStyle.borderColor,
+    customNodeStyle.fillColor,
+    data.id,
+    data.meta?.nodeSymbolId,
+    data.meta?.symbol,
+    updateNodeInternals,
+  ])
+
+  useLayoutEffect(() => {
+    if (!data.isEditing || isCanvasImage || isCanvasNote) return
+    updateNodeInternals(data.id)
+    const frameId = window.requestAnimationFrame(() => updateNodeInternals(data.id))
+
+    return () => window.cancelAnimationFrame(frameId)
+  }, [data.id, data.isEditing, editInputWidth, isCanvasImage, isCanvasNote, updateNodeInternals])
 
   useLayoutEffect(() => {
     if (!data.isEditing || (!inputRef.current && !noteEditorRef.current)) return
@@ -194,6 +231,12 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
             width: `${noteSize.width}px`,
             minHeight: `${noteSize.height}px`,
           } : {}),
+          ...(customNodeStyle.borderStyle ? {
+            borderStyle: customNodeStyle.borderStyle,
+            borderWidth: `${customNodeStyle.borderWidth ?? 2}px`,
+            borderColor: customNodeStyle.borderColor ?? nodeColor,
+          } : {}),
+          ...(customNodeStyle.fillColor ? { background: customNodeStyle.fillColor } : {}),
         } as CSSProperties}
       >
         {isChildPreview && <div className="tree-node-child-preview" />}
@@ -361,11 +404,7 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
               </div>
             </div>
           </div>
-        ) : isBranch && (
-          <span className="tree-node-branch-icon">
-            <Icon size={19} strokeWidth={1.8} />
-          </span>
-        )}
+        ) : null}
         {!isCanvasImage && !isCanvasNote && data.isEditing ? (
           <input
             ref={inputRef}
@@ -414,14 +453,23 @@ export const ThemeNodeRenderer = memo(({ data, selected }: NodeProps<ThemeNodeDa
                 data.onCancelEdit()
               }
             }}
+            style={{ width: `${editInputWidth}px` }}
             className="tree-node-edit-input nodrag nopan"
           />
         ) : !isCanvasImage && !isCanvasNote && isLeaf ? (
           <div className="tree-node-leaf-title">
+            {semanticSymbol
+              ? <NodeSymbolIcon symbol={semanticSymbol} size="small" />
+              : nodeSymbol && <span className="tree-node-symbol">{nodeSymbol}</span>}
             <span>{data.label}</span>
           </div>
         ) : !isCanvasImage && !isCanvasNote ? (
-          <div className="tree-node-title">{data.label}</div>
+          <div className="tree-node-title">
+            {semanticSymbol
+              ? <NodeSymbolIcon symbol={semanticSymbol} size="small" />
+              : nodeSymbol && <span className="tree-node-symbol">{nodeSymbol}</span>}
+            {data.label}
+          </div>
         ) : null}
         {!isCanvasImage && !isCanvasNote && nodeImages.length > 0 && (
           <div className="tree-node-image-strip">

@@ -169,7 +169,17 @@ function getLeafTextLineCount(label: string) {
 
 function getPlainLeafVisualHeight(node: BaseNode | undefined) {
   const lines = getLeafTextLineCount(node?.label ?? '')
-  return Math.max(LEAF_NODE_HEIGHT, lines * LEAF_TEXT_LINE_HEIGHT)
+  const hasCustomFrame = Boolean(
+    node?.meta?.nodeStyle?.borderStyle &&
+    node.meta.nodeStyle.borderStyle !== 'none'
+  )
+  const contentHeight = lines * LEAF_TEXT_LINE_HEIGHT
+  const borderWidth = hasCustomFrame && typeof node?.meta?.nodeStyle?.borderWidth === 'number'
+    ? Math.max(1, node.meta.nodeStyle.borderWidth)
+    : 2
+  return hasCustomFrame
+    ? Math.max(38, contentHeight + 12 + borderWidth * 2)
+    : Math.max(LEAF_NODE_HEIGHT, contentHeight)
 }
 
 function getExplicitNodeSize(node: BaseNode | undefined) {
@@ -217,7 +227,12 @@ function getNodeDepth(nodes: Record<string, BaseNode>, nodeId: string): number {
 function getNodeVerticalSpan(nodes: Record<string, BaseNode>, nodeId: string): number {
   const explicitSize = getExplicitNodeSize(nodes[nodeId])
   if (explicitSize) return explicitSize.height
-  return getNodeDepth(nodes, nodeId) <= 1 ? BRANCH_NODE_VERTICAL_SPAN : getPlainLeafVisualHeight(nodes[nodeId])
+  const node = nodes[nodeId]
+  const depth = getNodeDepth(nodes, nodeId)
+  const hasCustomFrame = Boolean(node?.meta?.nodeStyle?.borderStyle && node.meta.nodeStyle.borderStyle !== 'none')
+  if (depth === 0) return hasCustomFrame ? 64 : BRANCH_NODE_VERTICAL_SPAN
+  if (depth === 1) return Math.max(BRANCH_NODE_VERTICAL_SPAN, hasCustomFrame ? 56 : BRANCH_NODE_HEIGHT)
+  return getPlainLeafVisualHeight(node)
 }
 
 function getNodeVisualHeight(nodes: Record<string, BaseNode>, nodeId: string): number {
@@ -225,8 +240,10 @@ function getNodeVisualHeight(nodes: Record<string, BaseNode>, nodeId: string): n
   if (explicitSize) return explicitSize.height
 
   const depth = getNodeDepth(nodes, nodeId)
-  if (depth === 0) return ROOT_NODE_HEIGHT
-  if (depth === 1) return BRANCH_NODE_HEIGHT
+  const node = nodes[nodeId]
+  const hasCustomFrame = Boolean(node?.meta?.nodeStyle?.borderStyle && node.meta.nodeStyle.borderStyle !== 'none')
+  if (depth === 0) return hasCustomFrame ? 64 : ROOT_NODE_HEIGHT
+  if (depth === 1) return hasCustomFrame ? 56 : BRANCH_NODE_HEIGHT
   return getPlainLeafVisualHeight(nodes[nodeId])
 }
 
@@ -240,7 +257,10 @@ function getNodeVisualWidth(nodes: Record<string, BaseNode>, nodeId: string): nu
   if (depth === 1) return BRANCH_NODE_WIDTH
 
   const textLength = Math.max(1, node?.label.trim().length ?? 1)
-  return Math.max(LEAF_NODE_MIN_WIDTH, Math.min(LEAF_NODE_MAX_WIDTH, textLength * 16))
+  const hasCustomFrame = Boolean(node?.meta?.nodeStyle?.borderStyle && node.meta.nodeStyle.borderStyle !== 'none')
+  const hasSymbol = Boolean(node?.meta?.nodeSymbolId || node?.meta?.symbol)
+  const horizontalExtras = (hasCustomFrame ? 28 : 0) + (hasSymbol ? 24 : 0)
+  return Math.max(LEAF_NODE_MIN_WIDTH, Math.min(hasCustomFrame ? 252 : LEAF_NODE_MAX_WIDTH, textLength * 16 + horizontalExtras))
 }
 
 function getNodeCenterY(nodes: Record<string, BaseNode>, node: BaseNode): number {
@@ -657,7 +677,10 @@ export const useDocumentStore = create<DocumentState>((set) => ({
         'imageSize' in meta ||
         'noteSize' in meta ||
         'canvasImage' in meta ||
-        'canvasNote' in meta
+        'canvasNote' in meta ||
+        'nodeStyle' in meta ||
+        'nodeSymbolId' in meta ||
+        'symbol' in meta
 
       if (shouldRelayout) {
         relayoutFromRoot(nextNodes, id)

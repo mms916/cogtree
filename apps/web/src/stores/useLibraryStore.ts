@@ -54,6 +54,7 @@ export interface QuoteItem {
   id: string
   bookId: string
   text: string
+  textHtml?: string
   status: 'pending' | 'extracted'
   tags: string[]
   page?: string
@@ -93,6 +94,7 @@ interface LibraryState {
     quoteId?: string | null
     bookId: string
     text: string
+    textHtml?: string
     nodes: Record<string, BaseNode>
     rootNodeIds: string[]
     treeTitle?: string

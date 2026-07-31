@@ -1,19 +1,25 @@
 import { startTransition, useMemo, useCallback, useEffect, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import {
   ReactFlow,
   Background,
   Controls,
+  Panel,
   Position,
 } from '@xyflow/react'
 import type { Node, Edge, NodeChange, NodeTypes, ReactFlowInstance, NodePositionChange } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { CircleCheck, CircleDot, CircleHelp, ClipboardPaste, Copy, Edit3, Eye, GitBranchPlus, ImagePlus, ListPlus, Palette, PanelTopClose, PanelTopOpen, Star, StickyNote, Trash2 } from 'lucide-react'
+import { toCanvas } from 'html-to-image'
+import { CircleCheck, CircleDot, CircleHelp, ClipboardPaste, Copy, Download, Edit3, Eye, Frame, GitBranchPlus, ImagePlus, ListPlus, PaintBucket, Palette, PanelTopClose, PanelTopOpen, RotateCcw, Scissors, Shapes, Star, StickyNote, Trash2, X } from 'lucide-react'
 
 import type { BaseNode, NodeImageAttachment } from '../../stores/useDocumentStore'
 import { useDocumentStore } from '../../stores/useDocumentStore'
+import { useCanvasPreferencesStore } from '../../stores/useCanvasPreferencesStore'
+import type { FrameworkTemplate, FrameworkTemplateNode } from '../../stores/useCanvasPreferencesStore'
 import { getImageFilesFromClipboard, readImageFile } from './imageAttachments'
 import { MindMapEdge } from './MindMapEdge'
 import { ThemeNodeRenderer } from './ThemeNodeRenderer'
+import { getNodeSymbol, NodeSymbolIcon, NodeSymbolPicker } from './nodeSymbols'
 
 const nodeTypes: NodeTypes = {
   themeNode: ThemeNodeRenderer,
@@ -41,6 +47,44 @@ const EDGE_COLOR_SWATCHES = [
   '#4f46e5',
   '#2dd4bf',
   '#f8fafc',
+] as const
+
+const NODE_BORDER_COLOR_SWATCHES = [
+  '#2dd4bf',
+  '#14b8a6',
+  '#22c55e',
+  '#3b82f6',
+  '#6366f1',
+  '#8b5cf6',
+  '#d946ef',
+  '#ec4899',
+  '#ef4444',
+  '#f97316',
+  '#f59e0b',
+  '#eab308',
+  '#94a3b8',
+  '#cbd5e1',
+  '#f8fafc',
+  '#334155',
+] as const
+
+const NODE_FILL_COLOR_SWATCHES = [
+  '#111827',
+  '#0f172a',
+  '#172033',
+  '#1e293b',
+  '#12302f',
+  '#134e4a',
+  '#052e16',
+  '#172554',
+  '#1e3a8a',
+  '#312e81',
+  '#2e1065',
+  '#3b0764',
+  '#4a044e',
+  '#3f161c',
+  '#431407',
+  '#422006',
 ] as const
 
 const AUTO_FIT_VIEW_NODE_LIMIT = 180
@@ -106,6 +150,26 @@ type EdgeContextMenuState = {
   y: number
   color: string
   applyToDescendants: boolean
+}
+
+type NodeAppearanceState = {
+  nodeId: string
+  x: number
+  y: number
+  tab: 'appearance' | 'symbol'
+}
+
+type ScreenshotSelection = {
+  startX: number
+  startY: number
+  endX: number
+  endY: number
+}
+
+type PendingNodeColorPreview = {
+  nodeId: string
+  type: 'border' | 'fill'
+  color: string
 }
 
 type CanvasContextMenuGroup = 'edit' | 'create' | 'state' | 'danger'
@@ -442,6 +506,25 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [paneContextMenu, setPaneContextMenu] = useState<PaneContextMenuState | null>(null)
   const [edgeContextMenu, setEdgeContextMenu] = useState<EdgeContextMenuState | null>(null)
+  const [nodeAppearance, setNodeAppearance] = useState<NodeAppearanceState | null>(null)
+  const [openNodeColorPalette, setOpenNodeColorPalette] = useState<'border' | 'fill' | null>(null)
+  const [recentNodeBorderColors, setRecentNodeBorderColors] = useState<string[]>([])
+  const [recentNodeFillColors, setRecentNodeFillColors] = useState<string[]>([])
+  const [isScreenshotMode, setIsScreenshotMode] = useState(false)
+  const [screenshotSelection, setScreenshotSelection] = useState<ScreenshotSelection | null>(null)
+  const [screenshotStatus, setScreenshotStatus] = useState('')
+  const screenshotBlobRef = useRef<Blob | null>(null)
+  const { frameworkTemplates } = useCanvasPreferencesStore()
+
+  useEffect(() => {
+    setOpenNodeColorPalette(null)
+    setNodeAppearance((current) => {
+      if (!current) return current
+      if (!selectedNodeId) return null
+      if (current.nodeId === selectedNodeId) return current
+      return { ...current, nodeId: selectedNodeId }
+    })
+  }, [selectedNodeId])
   const [recentEdgeColors, setRecentEdgeColors] = useState<string[]>([])
   const [copiedNodeId, setCopiedNodeId] = useState<string | null>(
     () => canvasNodeClipboard?.rootNodeId ?? null
@@ -453,6 +536,9 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
   const canvasRootRef = useRef<HTMLDivElement | null>(null)
   const reactFlowInstanceRef = useRef<ReactFlowInstance | null>(null)
   const imageFileInputRef = useRef<HTMLInputElement | null>(null)
+  const pendingNodeColorPreviewRef = useRef<PendingNodeColorPreview | null>(null)
+  const nodeColorPreviewTimerRef = useRef<number | null>(null)
+  const nodeColorCommitTimerRef = useRef<number | null>(null)
   const lastHandledFocusRequestRef = useRef<number | null>(null)
   const focusCenterTimeoutRef = useRef<number | null>(null)
   const protectedLargeTreeIdRef = useRef<string | null>(null)
@@ -550,6 +636,12 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
       if (focusCenterTimeoutRef.current !== null) {
         window.clearTimeout(focusCenterTimeoutRef.current)
       }
+      if (nodeColorPreviewTimerRef.current !== null) {
+        window.clearTimeout(nodeColorPreviewTimerRef.current)
+      }
+      if (nodeColorCommitTimerRef.current !== null) {
+        window.clearTimeout(nodeColorCommitTimerRef.current)
+      }
     }
   }, [])
 
@@ -592,15 +684,24 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
     [createNode, documentNodes, onCommand, selectNode]
   )
 
-  const handleAddOptionChildren = useCallback(
-    (nodeId: string) => {
+  const handleAddFramework = useCallback(
+    (nodeId: string, template: FrameworkTemplate) => {
       const node = documentNodes[nodeId]
       if (!node) return
 
-      const labels = ['\u63d0\u70bc\u56e0\u679c', '\u8f6c\u6362\u56e0\u679c', '\u601d\u8003\u76ee\u6807', '\u641c\u96c6\u62fc\u56fe']
-      const newNodeIds = labels
-        .map((label) => createNode(nodeId, label, node.position, 'concept'))
-        .filter((newNodeId): newNodeId is string => Boolean(newNodeId))
+      const newNodeIds: string[] = []
+      const labels: string[] = []
+      const createTemplateBranch = (parentId: string, definitions: FrameworkTemplateNode[]) => {
+        definitions.forEach((definition) => {
+          const parent = useDocumentStore.getState().nodes[parentId] ?? node
+          const createdId = createNode(parentId, definition.label || '新节点', parent.position, 'concept')
+          if (!createdId) return
+          newNodeIds.push(createdId)
+          labels.push(definition.label || '新节点')
+          createTemplateBranch(createdId, definition.children)
+        })
+      }
+      createTemplateBranch(nodeId, template.nodes)
 
       if (newNodeIds.length === 0) return
 
@@ -608,7 +709,7 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
         commandName: 'create_node',
         targetId: nodeId,
         targetType: 'book_node',
-        payload: { parentId: nodeId, labels, nodeIds: newNodeIds, preset: 'framework' }
+        payload: { parentId: nodeId, labels, nodeIds: newNodeIds, preset: 'framework', frameworkId: template.id, frameworkName: template.name }
       })
       setEditingNodeId(null)
       setEditingDraft('')
@@ -934,6 +1035,26 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
     return cache
   }, [documentNodes, visibleNodeIds])
 
+  const framedNodeLayoutSignature = useMemo(
+    () => Object.values(documentNodes)
+      .filter((node) => node.meta?.nodeStyle?.borderStyle && node.meta.nodeStyle.borderStyle !== 'none')
+      .map((node) => [
+        node.id,
+        node.label,
+        node.meta?.nodeStyle?.borderStyle,
+        node.meta?.nodeStyle?.borderWidth ?? 2,
+        node.meta?.nodeSymbolId ?? node.meta?.symbol ?? '',
+      ].join(':'))
+      .sort()
+      .join('|'),
+    [documentNodes],
+  )
+
+  useEffect(() => {
+    if (!framedNodeLayoutSignature) return
+    relayoutTree()
+  }, [framedNodeLayoutSignature, relayoutTree])
+
   useEffect(() => {
     const currentTreeKey = treeId ?? `anonymous-${rootNodeIds.join('|')}`
     if (!currentTreeKey || relayoutedCollapsedTreeIdRef.current === currentTreeKey) return
@@ -972,6 +1093,13 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
       if (isModifierPressed && event.key.toLowerCase() === 'c' && selectedNodeId && !editingNodeId) {
         event.preventDefault()
         handleCopyNode(selectedNodeId)
+        return
+      }
+
+      if (isModifierPressed && event.key === 'Enter' && selectedNodeId && !editingNodeId) {
+        event.preventDefault()
+        event.stopPropagation()
+        startEditing(selectedNodeId)
         return
       }
 
@@ -1019,7 +1147,7 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [cancelEditing, editingNodeId, handleAddChild, handleAddSibling, handleCopyNode, handleDeleteNode, selectNodeByKeyboard, selectedNodeId])
+  }, [cancelEditing, editingNodeId, handleAddChild, handleAddSibling, handleCopyNode, handleDeleteNode, selectNodeByKeyboard, selectedNodeId, startEditing])
 
   const handleResizeNote = useCallback((nodeId: string, size: { width: number; height: number }, commit = false) => {
     const node = documentNodes[nodeId]
@@ -1662,6 +1790,74 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
     })
   }, [])
 
+  const downloadScreenshotBlob = useCallback((blob: Blob) => {
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `cogtree-screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.png`
+    link.click()
+    URL.revokeObjectURL(url)
+  }, [])
+
+  const copyScreenshotBlob = useCallback(async (blob: Blob) => {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      downloadScreenshotBlob(blob)
+      setScreenshotStatus('当前环境无法写入剪贴板，已下载 PNG')
+      return
+    }
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      setScreenshotStatus('截图已复制到剪贴板')
+    } catch {
+      setScreenshotStatus('截图已生成；浏览器未允许自动复制，可点击下载')
+    }
+  }, [downloadScreenshotBlob])
+
+  const captureSelectedArea = useCallback(async (selection: ScreenshotSelection) => {
+    const root = canvasRootRef.current
+    if (!root) return
+    const left = Math.min(selection.startX, selection.endX)
+    const top = Math.min(selection.startY, selection.endY)
+    const width = Math.abs(selection.endX - selection.startX)
+    const height = Math.abs(selection.endY - selection.startY)
+    if (width < 12 || height < 12) {
+      setScreenshotStatus('截图区域太小，请重新框选')
+      return
+    }
+
+    setScreenshotStatus('正在生成截图…')
+    const source = await toCanvas(root, {
+      backgroundColor: '#0d1117',
+      pixelRatio: Math.min(2, window.devicePixelRatio || 1),
+      filter: (node) => !(node instanceof HTMLElement)
+        || (!node.classList.contains('canvas-screenshot-overlay')
+          && !node.classList.contains('canvas-context-menu')
+          && !node.classList.contains('canvas-screenshot-result')),
+    })
+    const scaleX = source.width / root.clientWidth
+    const scaleY = source.height / root.clientHeight
+    const output = document.createElement('canvas')
+    output.width = Math.max(1, Math.round(width * scaleX))
+    output.height = Math.max(1, Math.round(height * scaleY))
+    const context = output.getContext('2d')
+    if (!context) return
+    context.drawImage(
+      source,
+      Math.round(left * scaleX),
+      Math.round(top * scaleY),
+      output.width,
+      output.height,
+      0,
+      0,
+      output.width,
+      output.height,
+    )
+    const blob = await new Promise<Blob | null>((resolve) => output.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('无法生成截图')
+    screenshotBlobRef.current = blob
+    await copyScreenshotBlob(blob)
+  }, [copyScreenshotBlob])
+
   const onPaneDoubleClick = useCallback(
     (event: React.MouseEvent) => {
       const instance = reactFlowInstanceRef.current
@@ -1711,8 +1907,29 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
         { key: 'cause', label: '\u65b0\u5efa\u56e0', icon: CircleDot, action: () => handleAddPresetChild(contextMenu.nodeId, '\u56e0'), group: 'create' },
         { key: 'effect', label: '\u65b0\u5efa\u679c', icon: CircleCheck, action: () => handleAddPresetChild(contextMenu.nodeId, '\u679c'), group: 'create' },
         { key: 'question', label: '\u65b0\u5efa\uff1f', icon: CircleHelp, action: () => handleAddPresetChild(contextMenu.nodeId, '\uff1f'), group: 'create' },
-        { key: 'options', label: '\u65b0\u5efa\u6846\u67b6', icon: ListPlus, action: () => handleAddOptionChildren(contextMenu.nodeId), group: 'create' },
+        ...frameworkTemplates
+          .filter((template) => template.enabled && template.nodes.length > 0)
+          .map((template) => ({
+            key: `framework-${template.id}`,
+            label: `新建·${template.name}`,
+            icon: Frame,
+            action: () => handleAddFramework(contextMenu.nodeId, template),
+            group: 'create' as const,
+          })),
         { key: 'image', label: '\u65b0\u5efa\u56fe\u8282\u70b9', icon: ImagePlus, action: () => handleAddImageToNode(contextMenu.nodeId), group: 'create', wide: true },
+        {
+          key: 'appearance',
+          label: '节点外观与符号',
+          icon: Shapes,
+          action: () => setNodeAppearance({
+            nodeId: contextMenu.nodeId,
+            x: Math.max(12, Math.min(contextMenu.x, window.innerWidth - 446)),
+            y: Math.max(12, Math.min(contextMenu.y, window.innerHeight - 676)),
+            tab: 'appearance',
+          }),
+          group: 'state' as const,
+          wide: true,
+        },
         {
           key: 'important',
           label: documentNodes[contextMenu.nodeId].meta?.isImportant === true ? '\u53d6\u6d88\u91cd\u8981' : '\u975e\u5e38\u91cd\u8981',
@@ -1910,6 +2127,19 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
               type="button"
               className="canvas-context-menu-item"
               onClick={() => {
+                setPaneContextMenu(null)
+                setScreenshotStatus('')
+                setScreenshotSelection(null)
+                setIsScreenshotMode(true)
+              }}
+            >
+              <Scissors size={14} strokeWidth={1.8} />
+              框选截图
+            </button>
+            <button
+              type="button"
+              className="canvas-context-menu-item"
+              onClick={() => {
                 createCanvasNoteNode(paneContextMenu.position)
                 setPaneContextMenu(null)
               }}
@@ -2010,6 +2240,345 @@ export function CanvasWorkspace({ onNodeSelect, focusNodeRequest, onFlowReady, o
               确定
             </button>
           </div>
+        )}
+        {nodeAppearance && documentNodes[nodeAppearance.nodeId] && (() => {
+          const targetNode = documentNodes[nodeAppearance.nodeId]
+          const nodeStyle = (targetNode.meta?.nodeStyle ?? {}) as {
+            borderStyle?: string
+            borderWidth?: number
+            borderColor?: string
+            fillColor?: string
+          }
+          const updateAppearance = (patch: Record<string, unknown>) => {
+            updateNodeMeta(targetNode.id, { nodeStyle: { ...nodeStyle, ...patch } })
+            onCommand?.({
+              commandName: 'update_node_meta',
+              targetId: targetNode.id,
+              targetType: 'book_node',
+              payload: { nodeStyle: { ...nodeStyle, ...patch } },
+            })
+          }
+          const selectedSemanticSymbol = getNodeSymbol(
+            typeof targetNode.meta?.nodeSymbolId === 'string' ? targetNode.meta.nodeSymbolId : undefined,
+          )
+          const selectNodeSymbol = (symbolId?: string) => {
+            updateNodeMeta(targetNode.id, { nodeSymbolId: symbolId, symbol: undefined })
+            onCommand?.({
+              commandName: 'update_node_meta',
+              targetId: targetNode.id,
+              targetType: 'book_node',
+              payload: { nodeSymbolId: symbolId ?? null, symbol: null },
+            })
+          }
+          const clearPendingNodeColorPreview = () => {
+            pendingNodeColorPreviewRef.current = null
+            if (nodeColorPreviewTimerRef.current !== null) {
+              window.clearTimeout(nodeColorPreviewTimerRef.current)
+              nodeColorPreviewTimerRef.current = null
+            }
+            if (nodeColorCommitTimerRef.current !== null) {
+              window.clearTimeout(nodeColorCommitTimerRef.current)
+              nodeColorCommitTimerRef.current = null
+            }
+          }
+          const selectNodeColor = (type: 'border' | 'fill', color: string) => {
+            clearPendingNodeColorPreview()
+            updateAppearance(type === 'border' ? { borderColor: color } : { fillColor: color })
+            if (type === 'border') {
+              setRecentNodeBorderColors((current) => [color, ...current.filter((item) => item !== color)].slice(0, 8))
+            } else {
+              setRecentNodeFillColors((current) => [color, ...current.filter((item) => item !== color)].slice(0, 8))
+            }
+            setOpenNodeColorPalette(null)
+          }
+          const previewCustomNodeColor = (type: 'border' | 'fill', color: string) => {
+            pendingNodeColorPreviewRef.current = { nodeId: targetNode.id, type, color }
+
+            if (nodeColorPreviewTimerRef.current === null) {
+              nodeColorPreviewTimerRef.current = window.setTimeout(() => {
+                nodeColorPreviewTimerRef.current = null
+                const pending = pendingNodeColorPreviewRef.current
+                if (!pending) return
+                const currentNode = useDocumentStore.getState().nodes[pending.nodeId]
+                if (!currentNode) return
+                const currentStyle = (currentNode.meta?.nodeStyle ?? {}) as Record<string, unknown>
+                updateNodeMeta(pending.nodeId, {
+                  nodeStyle: {
+                    ...currentStyle,
+                    [pending.type === 'border' ? 'borderColor' : 'fillColor']: pending.color,
+                  },
+                })
+              }, 32)
+            }
+
+            if (nodeColorCommitTimerRef.current !== null) {
+              window.clearTimeout(nodeColorCommitTimerRef.current)
+            }
+            nodeColorCommitTimerRef.current = window.setTimeout(() => {
+              nodeColorCommitTimerRef.current = null
+              const pending = pendingNodeColorPreviewRef.current
+              if (!pending) return
+              const currentNode = useDocumentStore.getState().nodes[pending.nodeId]
+              if (!currentNode) return
+              const currentStyle = (currentNode.meta?.nodeStyle ?? {}) as Record<string, unknown>
+              const nextNodeStyle = {
+                ...currentStyle,
+                [pending.type === 'border' ? 'borderColor' : 'fillColor']: pending.color,
+              }
+              onCommand?.({
+                commandName: 'update_node_meta',
+                targetId: pending.nodeId,
+                targetType: 'book_node',
+                payload: { nodeStyle: nextNodeStyle },
+              })
+            }, 180)
+          }
+          const renderNodeColorPicker = (
+            type: 'border' | 'fill',
+            value: string,
+            colors: readonly string[],
+            recentColors: string[],
+          ) => (
+            <div className="node-color-picker">
+              <button
+                type="button"
+                className={`node-color-picker-trigger${openNodeColorPalette === type ? ' is-active' : ''}`}
+                onClick={() => setOpenNodeColorPalette((current) => current === type ? null : type)}
+              >
+                <span className="node-color-picker-current" style={{ '--swatch': value } as CSSProperties} />
+                <span>选择颜色</span>
+                <Palette size={14} />
+              </button>
+              {openNodeColorPalette === type && (
+                <div className="node-color-popover">
+                  {recentColors.length > 0 && (
+                    <div className="node-color-popover-section">
+                      <span>最近使用</span>
+                      <div className="node-color-grid is-recent">
+                        {recentColors.map((color) => (
+                          <button
+                            key={color}
+                            type="button"
+                            className={value === color ? 'is-active' : ''}
+                            style={{ '--swatch': color } as CSSProperties}
+                            title={color}
+                            onClick={() => selectNodeColor(type, color)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="node-color-popover-section">
+                    <span>推荐颜色</span>
+                    <div className="node-color-grid">
+                      {colors.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          className={value === color ? 'is-active' : ''}
+                          style={{ '--swatch': color } as CSSProperties}
+                          title={color}
+                          onClick={() => selectNodeColor(type, color)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  <label className="node-color-custom">
+                    <Palette size={14} />
+                    <span>自定义颜色</span>
+                    <input
+                      type="color"
+                      value={value}
+                      onChange={(event) => previewCustomNodeColor(type, event.target.value)}
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          )
+          return (
+            <div
+              className={`canvas-context-menu node-appearance-menu${nodeAppearance.tab === 'symbol' ? ' is-symbol-tab' : ''}`}
+              style={{ left: nodeAppearance.x, top: nodeAppearance.y }}
+              onPointerDown={(event) => event.stopPropagation()}
+            >
+              <header className="node-appearance-header">
+                <div>
+                  <span><Shapes size={15} /></span>
+                  <div><strong>节点设计</strong><small>{targetNode.label}</small></div>
+                </div>
+                <button type="button" title="关闭" onClick={() => {
+                  setOpenNodeColorPalette(null)
+                  setNodeAppearance(null)
+                }}><X size={16} /></button>
+              </header>
+              <div className="node-appearance-tabs">
+                <button type="button" className={nodeAppearance.tab === 'appearance' ? 'is-active' : ''} onClick={() => {
+                  setOpenNodeColorPalette(null)
+                  setNodeAppearance((current) => current ? { ...current, tab: 'appearance' } : current)
+                }}><PaintBucket size={14} /> 外观</button>
+                <button type="button" className={nodeAppearance.tab === 'symbol' ? 'is-active' : ''} onClick={() => {
+                  setOpenNodeColorPalette(null)
+                  setNodeAppearance((current) => {
+                    if (!current) return current
+                    const symbolPanelWidth = Math.min(760, window.innerWidth - 24)
+                    return {
+                      ...current,
+                      x: Math.max(12, Math.min(current.x, window.innerWidth - symbolPanelWidth - 12)),
+                      tab: 'symbol',
+                    }
+                  })
+                }}><Shapes size={14} /> 符号</button>
+              </div>
+
+              <div
+                className="node-appearance-preview"
+                style={{
+                  borderStyle: nodeStyle.borderStyle ?? 'solid',
+                  borderWidth: nodeStyle.borderStyle === 'none' ? 0 : nodeStyle.borderWidth ?? 2,
+                  borderColor: nodeStyle.borderColor ?? '#2dd4bf',
+                  background: nodeStyle.fillColor ?? '#111827',
+                }}
+              >
+                {selectedSemanticSymbol && <NodeSymbolIcon symbol={selectedSemanticSymbol} size="small" />}
+                <span>{targetNode.label}</span>
+              </div>
+
+              {nodeAppearance.tab === 'appearance' ? (
+                <div className="node-appearance-content">
+                  <section>
+                    <div className="node-appearance-section-title"><span>边框样式</span><small>{nodeStyle.borderStyle === 'none' ? '无' : `${nodeStyle.borderWidth ?? 2}px`}</small></div>
+                    <div className="node-border-style-options">
+                      {(['none', 'solid', 'dashed', 'dotted', 'double'] as const).map((style) => (
+                        <button key={style} type="button" className={(nodeStyle.borderStyle ?? 'solid') === style ? 'is-active' : ''} title={{ none: '无边框', solid: '实线', dashed: '虚线', dotted: '点线', double: '双线' }[style]} onClick={() => updateAppearance({ borderStyle: style })}>
+                          <i
+                            className={style === 'none' ? 'is-none' : ''}
+                            style={{
+                              borderTopStyle: style === 'none' ? 'solid' : style,
+                              borderTopWidth: style === 'double' ? 4 : 2,
+                            }}
+                          />
+                        </button>
+                      ))}
+                    </div>
+                    <div className="node-border-width-options">
+                      {[1, 2, 3, 4, 5].map((width) => <button key={width} type="button" className={(nodeStyle.borderWidth ?? 2) === width ? 'is-active' : ''} onClick={() => updateAppearance({ borderWidth: width })}>{width}</button>)}
+                    </div>
+                  </section>
+                  <section>
+                    <div className="node-appearance-section-title"><span>边框颜色</span></div>
+                    {renderNodeColorPicker(
+                      'border',
+                      nodeStyle.borderColor ?? '#2dd4bf',
+                      NODE_BORDER_COLOR_SWATCHES,
+                      recentNodeBorderColors,
+                    )}
+                  </section>
+                  <section>
+                    <div className="node-appearance-section-title"><span>节点填充</span></div>
+                    {renderNodeColorPicker(
+                      'fill',
+                      nodeStyle.fillColor ?? '#111827',
+                      NODE_FILL_COLOR_SWATCHES,
+                      recentNodeFillColors,
+                    )}
+                  </section>
+                </div>
+              ) : (
+                <NodeSymbolPicker
+                  selectedId={typeof targetNode.meta?.nodeSymbolId === 'string' ? targetNode.meta.nodeSymbolId : undefined}
+                  onSelect={selectNodeSymbol}
+                />
+              )}
+              <div className="node-appearance-footer">
+                <button type="button" onClick={() => updateNodeMeta(targetNode.id, { nodeStyle: undefined, nodeSymbolId: undefined, symbol: undefined })}><RotateCcw size={13} /> 恢复默认</button>
+                <span>更改会自动保存到当前节点</span>
+              </div>
+            </div>
+          )
+        })()}
+        {selectedNodeId && documentNodes[selectedNodeId] && (
+          <Panel position="top-right" className="canvas-symbol-quick-panel">
+            <button
+              type="button"
+              title="节点外观与符号"
+              onClick={() => {
+                const rect = canvasRootRef.current?.getBoundingClientRect()
+                setNodeAppearance({
+                  nodeId: selectedNodeId,
+                  x: Math.max(12, (rect?.right ?? 560) - 446),
+                  y: Math.max(12, (rect?.top ?? 0) + 14),
+                  tab: 'appearance',
+                })
+              }}
+            >
+              <Shapes size={16} />
+              符号
+            </button>
+          </Panel>
+        )}
+        {isScreenshotMode && (
+          <div
+            className="canvas-screenshot-overlay"
+            onPointerDown={(event) => {
+              event.currentTarget.setPointerCapture(event.pointerId)
+              const rect = event.currentTarget.getBoundingClientRect()
+              const point = { x: event.clientX - rect.left, y: event.clientY - rect.top }
+              setScreenshotSelection({ startX: point.x, startY: point.y, endX: point.x, endY: point.y })
+            }}
+            onPointerMove={(event) => {
+              if (!screenshotSelection || !event.currentTarget.hasPointerCapture(event.pointerId)) return
+              const rect = event.currentTarget.getBoundingClientRect()
+              setScreenshotSelection((current) => current ? {
+                ...current,
+                endX: event.clientX - rect.left,
+                endY: event.clientY - rect.top,
+              } : current)
+            }}
+            onPointerUp={(event) => {
+              if (!screenshotSelection) return
+              const rect = event.currentTarget.getBoundingClientRect()
+              const completed = {
+                ...screenshotSelection,
+                endX: event.clientX - rect.left,
+                endY: event.clientY - rect.top,
+              }
+              setScreenshotSelection(completed)
+              void captureSelectedArea(completed)
+                .catch((error) => setScreenshotStatus(error instanceof Error ? error.message : '截图失败'))
+                .finally(() => setIsScreenshotMode(false))
+            }}
+            onContextMenu={(event) => {
+              event.preventDefault()
+              setIsScreenshotMode(false)
+              setScreenshotSelection(null)
+            }}
+          >
+            <div className="canvas-screenshot-hint">拖动框选截图区域 · 右键取消</div>
+            {screenshotSelection && (
+              <div
+                className="canvas-screenshot-selection"
+                style={{
+                  left: Math.min(screenshotSelection.startX, screenshotSelection.endX),
+                  top: Math.min(screenshotSelection.startY, screenshotSelection.endY),
+                  width: Math.abs(screenshotSelection.endX - screenshotSelection.startX),
+                  height: Math.abs(screenshotSelection.endY - screenshotSelection.startY),
+                }}
+              />
+            )}
+          </div>
+        )}
+        {screenshotStatus && (
+          <Panel position="top-center" className="canvas-screenshot-result">
+            <span>{screenshotStatus}</span>
+            {screenshotBlobRef.current && (
+              <>
+                <button type="button" onClick={() => void copyScreenshotBlob(screenshotBlobRef.current!)}>复制</button>
+                <button type="button" onClick={() => downloadScreenshotBlob(screenshotBlobRef.current!)}><Download size={14} /> 下载</button>
+              </>
+            )}
+            <button type="button" onClick={() => setScreenshotStatus('')}>关闭</button>
+          </Panel>
         )}
         {/* We can hide default controls if we implement custom floating toolbars, 
             but for now, we'll keep them as fallback or place them hidden */}

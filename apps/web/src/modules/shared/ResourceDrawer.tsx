@@ -584,7 +584,7 @@ export function ResourceDrawer() {
                     </div>
                   )}
                   <div style={{ 
-                    fontSize: '13px', 
+                    fontSize: '15px', 
                     lineHeight: '1.5',
                     display: '-webkit-box',
                     WebkitLineClamp: 3,
@@ -593,7 +593,7 @@ export function ResourceDrawer() {
                     whiteSpace: 'normal',
                     color: quote.status === 'extracted' ? 'var(--text-muted)' : 'var(--text-primary)'
                   }}>
-                    "{quote.text}"
+                    “{quote.text}”
                   </div>
                   <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div style={{ display: 'flex', gap: '4px' }}>

@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ChangeEvent } from 'react'
+import type { ChangeEvent, CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import type { ReactFlowInstance } from '@xyflow/react'
+import { Extension } from '@tiptap/core'
+import Color from '@tiptap/extension-color'
+import { TextStyle } from '@tiptap/extension-text-style'
+import UnderlineExtension from '@tiptap/extension-underline'
+import StarterKit from '@tiptap/starter-kit'
+import { EditorContent, useEditor } from '@tiptap/react'
 import {
+  Bold,
   Check,
   ChevronUp,
   Download,
@@ -11,12 +18,15 @@ import {
   Maximize,
   Minus,
   Network,
+  Palette,
   Plus,
   Redo2,
+  RemoveFormatting,
   Save,
   Share2,
   Sparkles,
   Trash2,
+  Underline as UnderlineIcon,
   Undo2,
   X
 } from 'lucide-react'
@@ -24,6 +34,7 @@ import {
 import { CanvasExportMenu } from '../components/CanvasExportMenu'
 import { FocusTimerButton } from '../components/FocusTimerButton'
 import { fetchJson } from '../lib/api'
+import { sanitizeQuoteHtml } from '../lib/quoteRichText'
 import { importTreeFromMarkdown } from '../lib/treeImport'
 import { downloadMarkdownFile, downloadTreeImage, downloadTreeSvg } from '../lib/treeExport'
 import { CanvasWorkspace } from '../modules/canvas/CanvasWorkspace'
@@ -99,79 +110,30 @@ type QuoteWorkspaceCommandName =
   | 'generate_keyword_nodes'
   | 'update_quote_text'
 
-function getSelectionActionPosition(
-  textarea: HTMLTextAreaElement,
-  anchorIndex: number
-): SelectionActionPosition | null {
-  if (typeof window === 'undefined') return null
+const QuoteFontSize = Extension.create({
+  name: 'quoteFontSize',
+  addGlobalAttributes() {
+    return [{
+      types: ['textStyle'],
+      attributes: {
+        fontSize: {
+          default: null,
+          parseHTML: (element) => element.style.fontSize || null,
+          renderHTML: (attributes) => attributes.fontSize ? { style: `font-size: ${attributes.fontSize}` } : {},
+        },
+      },
+    }]
+  },
+})
 
-  const computedStyle = window.getComputedStyle(textarea)
-  const mirror = document.createElement('div')
-  const marker = document.createElement('span')
-  const copiedStyles = [
-    'box-sizing',
-    'width',
-    'font-family',
-    'font-size',
-    'font-weight',
-    'font-style',
-    'letter-spacing',
-    'line-height',
-    'padding-top',
-    'padding-right',
-    'padding-bottom',
-    'padding-left',
-    'border-top-width',
-    'border-right-width',
-    'border-bottom-width',
-    'border-left-width',
-    'text-transform',
-    'text-indent',
-    'text-decoration',
-    'text-align',
-    'white-space',
-    'word-break',
-    'overflow-wrap'
-  ]
-
-  mirror.style.position = 'absolute'
-  mirror.style.visibility = 'hidden'
-  mirror.style.pointerEvents = 'none'
-  mirror.style.top = '0'
-  mirror.style.left = '-9999px'
-  mirror.style.whiteSpace = 'pre-wrap'
-  mirror.style.wordBreak = 'break-word'
-  mirror.style.overflowWrap = 'break-word'
-
-  copiedStyles.forEach((name) => {
-    mirror.style.setProperty(name, computedStyle.getPropertyValue(name))
-  })
-
-  mirror.style.width = `${textarea.clientWidth}px`
-  mirror.textContent = textarea.value.slice(0, anchorIndex)
-
-  if (mirror.textContent.endsWith('\n')) {
-    mirror.textContent += ' '
-  }
-
-  marker.textContent = textarea.value.slice(anchorIndex, anchorIndex + 1) || ' '
-  mirror.appendChild(marker)
-  document.body.appendChild(mirror)
-
-  const mirrorRect = mirror.getBoundingClientRect()
-  const markerRect = marker.getBoundingClientRect()
-  document.body.removeChild(mirror)
-
-  const estimatedMenuWidth = 170
-  const estimatedMenuHeight = 34
-  const left = markerRect.left - mirrorRect.left - textarea.scrollLeft + 20
-  const top = markerRect.bottom - mirrorRect.top - textarea.scrollTop + 25
-
-  return {
-    left: Math.max(8, Math.min(left, textarea.clientWidth - estimatedMenuWidth - 8)),
-    top: Math.max(6, Math.min(top, textarea.clientHeight - estimatedMenuHeight - 6))
-  }
-}
+const QUOTE_DEFAULT_TEXT_COLOR = '#e2e8f0'
+const QUOTE_TEXT_COLORS = [
+  '#f8fafc', '#e2e8f0', '#cbd5e1', '#94a3b8', '#64748b', '#2dd4bf',
+  '#14b8a6', '#38bdf8', '#0ea5e9', '#60a5fa', '#3b82f6', '#818cf8',
+  '#6366f1', '#a78bfa', '#8b5cf6', '#f472b6', '#ec4899', '#fb7185',
+  '#f87171', '#ef4444', '#fb923c', '#f59e0b', '#facc15', '#a3e635',
+  '#84cc16', '#4ade80', '#34d399',
+]
 
 function createPanelKeywords(texts?: string[]): PanelKeyword[] {
   return (texts ?? [])
@@ -197,22 +159,26 @@ export function QuotesPage() {
   const [hoveredKeywordId, setHoveredKeywordId] = useState<string | null>(null)
   const [selectionActionPosition, setSelectionActionPosition] = useState<SelectionActionPosition | null>(null)
   const [workbenchPosition, setWorkbenchPosition] = useState<WorkbenchPosition | null>(null)
-  const [workbenchSize, setWorkbenchSize] = useState<WorkbenchSize>({ width: 420, height: 430 })
+  const [workbenchSize, setWorkbenchSize] = useState<WorkbenchSize>({ width: 420, height: 560 })
   const [isWorkbenchDragging, setIsWorkbenchDragging] = useState(false)
-  const [isWorkbenchResizing, setIsWorkbenchResizing] = useState(false)
   const [saveState, setSaveState] = useState<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle')
   const [saveErrorMessage, setSaveErrorMessage] = useState('')
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
   const [pendingMarkdownImport, setPendingMarkdownImport] = useState<PendingMarkdownImport | null>(null)
   const [markdownImportProgress, setMarkdownImportProgress] = useState<MarkdownImportProgress | null>(null)
+  const [isQuoteColorPaletteOpen, setIsQuoteColorPaletteOpen] = useState(false)
+  const [activeQuoteTextColor, setActiveQuoteTextColor] = useState(QUOTE_DEFAULT_TEXT_COLOR)
+  const [recentQuoteTextColors, setRecentQuoteTextColors] = useState(['#f8fafc', '#2dd4bf', '#60a5fa', '#f87171'])
 
-  const quoteTextareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const quoteTextHtmlRef = useRef('')
+  const quoteSelectionRef = useRef<{ from: number; to: number } | null>(null)
   const markdownInputRef = useRef<HTMLInputElement | null>(null)
   const canvasContainerRef = useRef<HTMLDivElement | null>(null)
   const flowFitViewRef = useRef<ReactFlowInstance['fitView'] | null>(null)
   const workbenchRef = useRef<HTMLDivElement | null>(null)
   const workbenchDragRef = useRef<WorkbenchDragState | null>(null)
   const workbenchResizeRef = useRef<WorkbenchResizeState | null>(null)
+  const workbenchResizePreviewRef = useRef<(WorkbenchPosition & WorkbenchSize) | null>(null)
   const skipNextQuoteAutoLoadRef = useRef(false)
   const suspendDefaultQuoteLoadRef = useRef(false)
   const quoteCommandSequenceRef = useRef(0)
@@ -255,6 +221,78 @@ export function QuotesPage() {
   const [activeQuoteId, setActiveQuoteId] = useState<string | null>(currentQuote?.id ?? null)
   const activeQuote = activeQuoteId ? quotes.find((quote) => quote.id === activeQuoteId) ?? null : null
   const [quoteText, setQuoteText] = useState(currentQuote ? currentQuote.text : '')
+  const [, setQuoteTextHtml] = useState(currentQuote?.textHtml ?? currentQuote?.text ?? '')
+  const quoteEditor = useEditor({
+    extensions: [StarterKit, UnderlineExtension, TextStyle, Color, QuoteFontSize],
+    content: sanitizeQuoteHtml(currentQuote?.textHtml ?? currentQuote?.text ?? ''),
+    editorProps: {
+      attributes: { class: 'quote-workbench-rich-editor', 'data-placeholder': '在这里输入或粘贴金句...' },
+      handleDOMEvents: {
+        pointerdown: (_view, event) => { event.stopPropagation(); return false },
+        mousedown: (_view, event) => { event.stopPropagation(); return false },
+        keydown: (_view, event) => { event.stopPropagation(); return false },
+      },
+    },
+    onUpdate: ({ editor }) => {
+      const text = editor.getText()
+      const html = editor.getHTML()
+      setQuoteText(text)
+      quoteTextHtmlRef.current = html
+      setSaveState('dirty')
+      setSaveErrorMessage('')
+    },
+    onSelectionUpdate: ({ editor }) => {
+      const { from, to } = editor.state.selection
+      const text = editor.state.doc.textBetween(from, to, ' ').trim()
+      if (!text || from === to) {
+        if (editor.isFocused) {
+          quoteSelectionRef.current = null
+          setIsSelecting(false)
+          setSelectionActionPosition(null)
+        }
+        return
+      }
+      quoteSelectionRef.current = { from, to }
+      const editorContainer = editor.view.dom.closest('[data-quote-editor-container]')
+      const editorRect = (editorContainer ?? editor.view.dom).getBoundingClientRect()
+      const coords = editor.view.coordsAtPos(to)
+      setSelectedText(text)
+      setIsSelecting(true)
+      setSelectionActionPosition({
+        left: Math.max(8, Math.min(coords.left - editorRect.left, editorRect.width - 178)),
+        top: Math.max(6, coords.bottom - editorRect.top + 6),
+      })
+    },
+  })
+  const withQuoteSelection = () => {
+    if (!quoteEditor) return null
+    const chain = quoteEditor.chain().focus()
+    return quoteSelectionRef.current ? chain.setTextSelection(quoteSelectionRef.current) : chain
+  }
+  const applyQuoteTextColor = (color: string) => {
+    withQuoteSelection()?.setColor(color).run()
+    setActiveQuoteTextColor(color)
+    setRecentQuoteTextColors((current) => [color, ...current.filter((item) => item !== color)].slice(0, 6))
+    setIsQuoteColorPaletteOpen(false)
+  }
+  const applyQuoteEmphasisStyle = () => {
+    const chain = withQuoteSelection()
+    if (!chain || !quoteEditor) return
+    chain
+      .setMark('textStyle', { fontSize: '18px' })
+      .setColor('#ef4444')
+      .setMark('bold')
+      .setMark('underline')
+      .run()
+    setActiveQuoteTextColor('#ef4444')
+    setRecentQuoteTextColors((current) => ['#ef4444', ...current.filter((item) => item !== '#ef4444')].slice(0, 6))
+    setIsQuoteColorPaletteOpen(false)
+  }
+  const clearQuoteFormatting = () => {
+    withQuoteSelection()?.unsetAllMarks().clearNodes().run()
+    setActiveQuoteTextColor(QUOTE_DEFAULT_TEXT_COLOR)
+    setIsQuoteColorPaletteOpen(false)
+  }
   const exportTitle = `${currentBook?.title ?? '未选择书籍'}-金句提炼`
 
   const buildWorkspacePayload = (
@@ -262,7 +300,8 @@ export function QuotesPage() {
     quoteIdOverride?: string | null,
     nodeMapOverride?: typeof nodes,
     rootIdsOverride?: typeof rootNodeIds,
-    workspaceKeywordTextsOverride?: string[]
+    workspaceKeywordTextsOverride?: string[],
+    textHtmlOverride?: string
   ) => {
     if (!currentBook) return null
 
@@ -284,6 +323,7 @@ export function QuotesPage() {
       quoteId: quoteIdOverride ?? activeQuote?.id,
       bookId: currentBook.id,
       text,
+      textHtml: sanitizeQuoteHtml(textHtmlOverride ?? quoteTextHtmlRef.current),
       nodes: effectiveNodes,
       rootNodeIds: [...effectiveRootNodeIds],
       treeTitle,
@@ -387,6 +427,9 @@ export function QuotesPage() {
     suspendDefaultQuoteLoadRef.current = false
     setActiveQuoteId(selectedQuote.id)
     setQuoteText(selectedQuote.text)
+    quoteTextHtmlRef.current = selectedQuote.textHtml ?? selectedQuote.text
+    setQuoteTextHtml(selectedQuote.textHtml ?? selectedQuote.text)
+    quoteEditor?.commands.setContent(sanitizeQuoteHtml(selectedQuote.textHtml ?? selectedQuote.text), { emitUpdate: false })
     setPanelKeywords(createPanelKeywords(selectedQuote.workspaceKeywords))
     setCurrentHighlight('')
     setSelectedText('')
@@ -475,6 +518,9 @@ export function QuotesPage() {
     if (selectedQuoteId) return
     if (activeQuote) {
       setQuoteText(activeQuote.text)
+      quoteTextHtmlRef.current = activeQuote.textHtml ?? activeQuote.text
+      setQuoteTextHtml(activeQuote.textHtml ?? activeQuote.text)
+      quoteEditor?.commands.setContent(sanitizeQuoteHtml(activeQuote.textHtml ?? activeQuote.text), { emitUpdate: false })
       setPanelKeywords(createPanelKeywords(activeQuote.workspaceKeywords))
       if (!activeQuote.treeSnapshot && (activeQuote.nodeCount || activeQuote.status === 'extracted')) {
         if (loadingQuoteWorkspaceIdRef.current !== activeQuote.id) {
@@ -499,6 +545,9 @@ export function QuotesPage() {
       }
     } else {
       setQuoteText('')
+      quoteTextHtmlRef.current = ''
+      setQuoteTextHtml('')
+      quoteEditor?.commands.clearContent(false)
       setPanelKeywords([])
       clearNodes()
     }
@@ -551,30 +600,6 @@ export function QuotesPage() {
     rootNodeIds,
     selectedQuoteId
   ])
-
-  useEffect(() => {
-    if (!isSelecting || !quoteTextareaRef.current) return
-
-    const textarea = quoteTextareaRef.current
-    const selectionEnd = textarea.selectionEnd ?? textarea.selectionStart ?? 0
-    setSelectionActionPosition(getSelectionActionPosition(textarea, selectionEnd))
-  }, [isSelecting])
-
-  const handleSelect = (event: React.SyntheticEvent<HTMLTextAreaElement>) => {
-    const target = event.target as HTMLTextAreaElement
-    const selectionStart = target.selectionStart ?? 0
-    const selectionEnd = target.selectionEnd ?? selectionStart
-    const text = target.value.substring(selectionStart, selectionEnd).trim()
-
-    if (text) {
-      setSelectedText(text)
-      setIsSelecting(true)
-      setSelectionActionPosition(getSelectionActionPosition(target, selectionEnd))
-    } else {
-      setIsSelecting(false)
-      setSelectionActionPosition(null)
-    }
-  }
 
   const handleCombineHighlight = () => {
     if (!selectedText) return
@@ -700,6 +725,9 @@ export function QuotesPage() {
       clearNodes()
       setActiveQuoteId(null)
       setQuoteText('')
+      quoteTextHtmlRef.current = ''
+      setQuoteTextHtml('')
+      quoteEditor?.commands.clearContent(false)
       setPanelKeywords([])
       setHoveredKeywordId(null)
       setCurrentHighlight('')
@@ -848,6 +876,9 @@ export function QuotesPage() {
         })
       })
       setQuoteText(importedQuoteText)
+      quoteTextHtmlRef.current = importedQuoteText
+      setQuoteTextHtml(importedQuoteText)
+      quoteEditor?.commands.setContent(importedQuoteText, { emitUpdate: false })
       setPanelKeywords(createPanelKeywords(importedKeywords))
       setSelectedNodeId(null)
       setKnowledgeNodeId(null)
@@ -864,7 +895,8 @@ export function QuotesPage() {
         null,
         importedTree.nodes,
         importedTree.rootNodeIds,
-        importedKeywords
+        importedKeywords,
+        importedQuoteText
       )
       if (!payload) throw new Error('Failed to build markdown import payload.')
 
@@ -990,14 +1022,24 @@ export function QuotesPage() {
       height: panelRect.height,
       corner
     }
-    setWorkbenchPosition({ left, top })
-    setIsWorkbenchResizing(true)
+    workbenchResizePreviewRef.current = {
+      left,
+      top,
+      width: panelRect.width,
+      height: panelRect.height,
+    }
+    workbenchRef.current.style.left = `${left}px`
+    workbenchRef.current.style.top = `${top}px`
+    workbenchRef.current.style.bottom = 'auto'
+    workbenchRef.current.style.transform = 'none'
+    workbenchRef.current.style.opacity = '0.9'
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
   const handleWorkbenchResizePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const resizeState = workbenchResizeRef.current
-    if (!resizeState || resizeState.pointerId !== event.pointerId || !canvasContainerRef.current) return
+    const workbenchElement = workbenchRef.current
+    if (!resizeState || resizeState.pointerId !== event.pointerId || !canvasContainerRef.current || !workbenchElement) return
     event.preventDefault()
     event.stopPropagation()
 
@@ -1016,19 +1058,33 @@ export function QuotesPage() {
     const nextLeft = resizingLeft ? resizeState.left + resizeState.width - nextWidth : resizeState.left
     const nextTop = resizingTop ? resizeState.top + resizeState.height - nextHeight : resizeState.top
 
-    setWorkbenchSize({ width: nextWidth, height: nextHeight })
-    setWorkbenchPosition({
+    const preview = {
+      width: nextWidth,
+      height: nextHeight,
       left: Math.max(padding, Math.min(nextLeft, containerRect.width - nextWidth - padding)),
-      top: Math.max(padding, Math.min(nextTop, containerRect.height - nextHeight - padding))
-    })
+      top: Math.max(padding, Math.min(nextTop, containerRect.height - nextHeight - padding)),
+    }
+    workbenchResizePreviewRef.current = preview
+    workbenchElement.style.width = `${preview.width}px`
+    workbenchElement.style.height = `${preview.height}px`
+    workbenchElement.style.left = `${preview.left}px`
+    workbenchElement.style.top = `${preview.top}px`
   }
 
   const handleWorkbenchResizePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
     if (workbenchResizeRef.current?.pointerId === event.pointerId) {
       event.preventDefault()
       event.stopPropagation()
+      const preview = workbenchResizePreviewRef.current
       workbenchResizeRef.current = null
-      setIsWorkbenchResizing(false)
+      workbenchResizePreviewRef.current = null
+      if (workbenchRef.current) {
+        workbenchRef.current.style.opacity = '1'
+      }
+      if (preview) {
+        setWorkbenchSize({ width: preview.width, height: preview.height })
+        setWorkbenchPosition({ left: preview.left, top: preview.top })
+      }
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
   }
@@ -1128,7 +1184,7 @@ export function QuotesPage() {
                     width: `${workbenchSize.width}px`,
                     height: `${workbenchSize.height}px`,
                     maxWidth: 'calc(100% - 32px)',
-                    maxHeight: 'calc(100% - 122px)',
+                    maxHeight: 'calc(100% - 92px)',
                     zIndex: 18,
                     background: 'rgba(19, 23, 32, 0.88)',
                     border: '1px solid rgba(45, 212, 191, 0.28)',
@@ -1136,7 +1192,7 @@ export function QuotesPage() {
                     boxShadow: '0 18px 44px rgba(0,0,0,0.34)',
                     backdropFilter: 'blur(14px)',
                     overflow: 'visible',
-                    opacity: isWorkbenchDragging || isWorkbenchResizing ? 0.9 : 1
+                    opacity: isWorkbenchDragging ? 0.9 : 1
                   }}
                   onPointerDown={(event) => event.stopPropagation()}
                   onPointerMove={(event) => event.stopPropagation()}
@@ -1211,23 +1267,70 @@ export function QuotesPage() {
                     <div style={{ height: 'calc(100% - 42px)', overflowY: 'auto', padding: '0 12px 12px 12px' }}>
                       <div style={{ minWidth: 0, display: 'grid', gridTemplateColumns: workbenchSize.width >= 620 ? 'minmax(0, 1.1fr) minmax(280px, 0.9fr)' : '1fr', gap: '10px' }}>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>
-                          <div style={{ position: 'relative' }}>
-                            <label style={{ display: 'block', fontSize: '12px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-                              原文
-                            </label>
-                            <textarea
-                              ref={quoteTextareaRef}
-                              value={quoteText}
-                              onChange={(event) => {
-                                setQuoteText(event.target.value)
-                                setSaveState('dirty')
-                                setSaveErrorMessage('')
-                              }}
-                              onSelect={handleSelect}
-                              onMouseUp={handleSelect}
-                              onKeyUp={handleSelect}
-                              onScroll={handleSelect}
-                              placeholder="在这里输入或粘贴金句..."
+                          <div data-quote-editor-container style={{ position: 'relative' }}>
+                            <div className="knowledge-rich-toolbar quote-workbench-toolbar" style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '6px', overflow: 'visible' }}>
+                              <select
+                                aria-label="字号"
+                                defaultValue="4"
+                                onMouseDown={(event) => event.stopPropagation()}
+                                onChange={(event) => withQuoteSelection()?.setMark('textStyle', { fontSize: `${({ '2': 14, '3': 16, '4': 18, '5': 24 } as Record<string, number>)[event.target.value]}px` }).run()}
+                                style={{ borderRadius: '5px', background: 'var(--bg-dark)', color: 'var(--text-primary)', border: '1px solid var(--border-color)' }}
+                              >
+                                <option value="2">小</option><option value="3">标准</option><option value="4">大</option><option value="5">特大</option>
+                              </select>
+                              <button type="button" className="icon-btn" title="加粗" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); withQuoteSelection()?.toggleBold().run() }}><Bold size={13} /></button>
+                              <button type="button" className="icon-btn" title="下划线" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); withQuoteSelection()?.toggleUnderline().run() }}><UnderlineIcon size={13} /></button>
+                              <button type="button" className="icon-btn knowledge-rich-emphasis-button" title="重点样式：红色大号加粗下划线" onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); applyQuoteEmphasisStyle() }}><Sparkles size={13} /></button>
+                              <div className="knowledge-rich-color-wrap" onMouseDown={(event) => event.stopPropagation()}>
+                                <button
+                                  type="button"
+                                  className={`icon-btn knowledge-rich-color-trigger ${isQuoteColorPaletteOpen ? 'is-active' : ''}`}
+                                  title="文字颜色"
+                                  onMouseDown={(event) => {
+                                    event.preventDefault()
+                                    event.stopPropagation()
+                                    setIsQuoteColorPaletteOpen((current) => !current)
+                                  }}
+                                >
+                                  <Palette size={13} />
+                                  <span style={{ background: activeQuoteTextColor }} />
+                                </button>
+                                {isQuoteColorPaletteOpen && (
+                                  <div className="knowledge-rich-color-popover" onMouseDown={(event) => event.stopPropagation()}>
+                                    <div className="knowledge-rich-color-section">
+                                      <div className="knowledge-rich-color-label">最近使用</div>
+                                      <div className="knowledge-rich-color-grid is-recent">
+                                        {recentQuoteTextColors.map((color) => (
+                                          <button key={color} type="button" className={color === activeQuoteTextColor ? 'is-active' : ''} title={color} style={{ '--swatch-color': color } as CSSProperties} onMouseDown={(event) => { event.preventDefault(); applyQuoteTextColor(color) }} />
+                                        ))}
+                                      </div>
+                                    </div>
+                                    <div className="knowledge-rich-color-section">
+                                      <div className="knowledge-rich-color-label">推荐颜色</div>
+                                      <div className="knowledge-rich-color-grid">
+                                        {QUOTE_TEXT_COLORS.map((color) => (
+                                          <button key={color} type="button" className={color === activeQuoteTextColor ? 'is-active' : ''} title={color} style={{ '--swatch-color': color } as CSSProperties} onMouseDown={(event) => { event.preventDefault(); applyQuoteTextColor(color) }} />
+                                        ))}
+                                      </div>
+                                    </div>
+                                    <button type="button" className="knowledge-rich-color-clear" onMouseDown={(event) => { event.preventDefault(); withQuoteSelection()?.unsetColor().run(); setActiveQuoteTextColor(QUOTE_DEFAULT_TEXT_COLOR); setIsQuoteColorPaletteOpen(false) }}>恢复默认</button>
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                className="icon-btn"
+                                title="清除格式"
+                                onMouseDown={(event) => {
+                                  event.preventDefault()
+                                  event.stopPropagation()
+                                  clearQuoteFormatting()
+                                }}
+                              >
+                                <RemoveFormatting size={13} />
+                              </button>
+                            </div>
+                            <div
                               style={{
                                 width: '100%',
                                 minHeight: '98px',
@@ -1237,14 +1340,18 @@ export function QuotesPage() {
                                 padding: '9px 10px 18px',
                                 borderRadius: '6px',
                                 border: '1px solid rgba(47, 57, 72, 0.95)',
-                                fontSize: '12px',
+                                fontSize: '16px',
                                 lineHeight: '1.5',
                                 color: 'var(--text-primary)',
-                                resize: 'vertical',
+                                overflowY: 'auto',
                                 outline: 'none',
-                                fontFamily: 'inherit'
+                                fontFamily: 'inherit',
+                                userSelect: 'text',
+                                WebkitUserSelect: 'text'
                               }}
-                            />
+                            >
+                              <EditorContent editor={quoteEditor} />
+                            </div>
                             <span
                               style={{
                                 position: 'absolute',
